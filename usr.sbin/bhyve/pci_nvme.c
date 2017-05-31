@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <dev/nvme/nvme.h>
+
 #include "pci_emul.h"
 
 #define NVME_DEBUG
@@ -13,36 +15,13 @@ static FILE *dbg;
 #endif
 
 struct pci_nvme_softc {
-
-    uint32_t cap_hi;
-    uint32_t cap_low;
-    uint32_t vs;
-    uint32_t intms;
-    uint32_t intmc;
-    uint32_t cc;
-    uint32_t reserved0;
-    uint32_t csts;
-    uint32_t nssr;
-    uint32_t aqa;
-    uint64_t asq;
-    uint64_t acq;
-    uint32_t cmbloc;
-    uint32_t cmbsz;
-    uint32_t bpinfo;
-    uint32_t bprsel;
-    uint64_t bpmbl;
-
-    //
-    uint32_t sqytdbl;
-    uint32_t cqyhdbl;
-
-
+    struct nvme_registers regs;
 };
 
 static void
 nvme_reset(struct pci_nvme_softc *sc)
 {
-    sc->nssr = 0x4e564d65;
+/*     sc->nssr = 0x4e564d65; */
 }
 
 static int 
@@ -56,10 +35,15 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
+    //TODO
+/*     pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32,); */
 
 	sc = calloc(1, sizeof(struct pci_nvme_softc));
 	pi->pi_arg = sc;
 /*     sc->asc_pi = pi; */
+
+    sc->regs.cap_hi.raw = 0x00000000;
+    sc->regs.cap_lo.raw = 0x02000000;
 
     nvme_reset(sc);
 
