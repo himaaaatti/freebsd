@@ -35,8 +35,8 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
-    //TODO
-/*     pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32,); */
+    // for NVMe Controller Registers
+    pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x1000);
 
 	sc = calloc(1, sizeof(struct pci_nvme_softc));
 	pi->pi_arg = sc;
