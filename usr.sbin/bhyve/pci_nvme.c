@@ -22,16 +22,18 @@ enum nvme_controller_register_offsets {
     NVME_CR_INTMS   = 0x0c,
     NVME_CR_INTMC   = 0x10,
     NVME_CR_CC      = 0x14,
-    NVME_CR_CSTS    = 0x10,
+    NVME_CR_CSTS    = 0x1c,
     NVME_CR_NSSR    = 0x20,
     NVME_CR_AQA     = 0x24,
-    NVME_CR_ASQ     = 0x28,
-    NVME_CR_ACQ     = 0x30,
-    NVME_CR_CMBLOC  = 0x38,
-    NVME_CR_CMBSZ   = 0x3c,
-    NVME_CR_BPINFO  = 0x40,
-    NVME_CR_BPRSEL  = 0x44,
-    NVME_CR_BPMBL   = 0x48,
+    NVME_CR_ASQ_LOW = 0x28,
+    NVME_CR_ASQ_HI  = 0x2c,
+    NVME_CR_ACQ_LOW = 0x30,
+    NVME_CR_ACQ_HI  = 0x34,
+/*     NVME_CR_CMBLOC  = 0x38, */ // optional
+/*     NVME_CR_CMBSZ   = 0x3c, */
+/*     NVME_CR_BPINFO  = 0x40, */
+/*     NVME_CR_BPRSEL  = 0x44, */
+/*     NVME_CR_BPMBL   = 0x48, */
     NVME_CR_IO_QUEUE_BASE = 0x1000, // submission queue 0 tail doorbell (admin)
 };
 
@@ -62,7 +64,7 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
         DPRINTF("error is occured in pci_emul_alloc_bar\n");
         return 1;
     }
-    if(pci_emul_add_msixcap(pi, 2, 4)) //XXX fix msix num 
+    if(pci_emul_add_msixcap(pi, 4, 4)) //XXX fix msix num 
     {
         DPRINTF("error is occured in pci_emul_add_msixcap\n");
         return 1;
@@ -80,48 +82,110 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     return 0;
 }
 
-
-static uint64_t
-pci_nvme_write_bar_0(struct pci_nvme_softc *sc, uint64_t offset, uint64_t value, int size)
+static void 
+pci_nvme_write_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value, int size)
 {
-    switch(offset) 
+    switch(regoff) 
     {
+        case NVME_CR_CC:
+            if(size == 4)
+            {
+                //TODO 
+                // - 1 -> 0
+                //  Controler Reset
+                //      - delete all I/O Submission queues and Completion queues
+                //      - reset admin submittion queue and completion queue
+                //      - move to idle state
+                //      - all controller registers are reset to their default values (defined in section 5.21.1)
+                //       
+                //      - CSTS.RDY bit is cleared to '0'.
+                //
+                // - 0 -> 1
+                //      - When a controller is ready to process commands, the controller set '1' to CSTS.RDY.
+                //
+
+                sc->regs.cc.raw = (uint32_t)value;
+                return;
+            }
+            else 
+            {
+                assert(0);
+            }
+        case NVME_CR_AQA:
+            if(size == 4)
+            {
+                sc->regs.aqa.raw = (uint32_t)value;
+                return;
+            }
+            else
+            {
+                assert(0);
+            }
+        case NVME_CR_ASQ_LOW:
+            if(size == 4)
+            {
+                sc->regs.asq = (sc->regs.asq & 0xffffffff00000000) | value;
+                return;
+            }
+            else 
+            {
+                assert(0);
+            }
+        case NVME_CR_ASQ_HI:
+            if(size == 4)
+            {
+                sc->regs.asq = (sc->regs.asq & 0x00000000ffffffff) | (value << 32);
+                return;
+            }
+            else {
+                assert(0);
+            }
+        case NVME_CR_ACQ_LOW:
+            if(size == 4)
+            {
+                sc->regs.acq = (sc->regs.acq & 0xffffffff00000000) | value;
+                return;
+            }
+            else 
+            {
+                assert(0);
+            }
+
+        case NVME_CR_ACQ_HI:
+            if(size == 4)
+            {
+                sc->regs.acq = (sc->regs.acq & 0x00000000ffffffff) | (value << 32);
+                return;
+            }
+            else 
+            {
+                assert(0);
+            }
         default:
-            DPRINTF("unknown offset 0x%lx with 0x%lx in %s\n", offset, value, __func__);
+            DPRINTF("unknown regoff 0x%lx with value 0x%lx, size %d in %s\n", regoff, value, size, __func__);
             assert(0);
     }
 }
-
-static uint64_t
-pci_nvme_write_bar_4(struct pci_nvme_softc *sc, uint64_t offset, uint64_t value, int size)
-{
-    switch(offset)
-    {
-        default:
-            DPRINTF("unknown offset 0x%lx with 0x%lx in %s\n", offset, value, __func__);
-            assert(0);
-    }
-}
-
 
 static void
 pci_nvme_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
-		int baridx, uint64_t offset, int size, uint64_t value)
+		int baridx, uint64_t regoff, int size, uint64_t value)
 {
     struct pci_nvme_softc *sc = pi->pi_arg;
 
     if(baridx == pci_msix_table_bar(pi) || 
             baridx == pci_msix_pba_bar(pi))
     {
-        pci_emul_msix_twrite(pi, offset, size, value);
+        DPRINTF("msix: regoff 0x%lx, size %d, value %lx\n", regoff, size, value);
+        pci_emul_msix_twrite(pi, regoff, size, value);
         return;
     }
-
+    DPRINTF("write regoff 0x%lx, size %d, value %lx\n", regoff, size, value);
 
     switch(baridx)
     {
         case 0:
-            pci_nvme_write_bar_0(sc, offset, value, size);
+            pci_nvme_write_bar_0(sc, regoff, value, size);
             break;
 
         default:
@@ -140,10 +204,9 @@ pci_nvme_read_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, int size)
                 return (uint64_t)sc->regs.cap_lo.raw;
             }
             else {
-                DPRINTF("not implemented, offset 0x%lx, size %d\n", regoff, size);
+                DPRINTF("not implemented, regoff 0x%lx, size %d\n", regoff, size);
                 assert(0);
             }
-
 
         case NVME_CR_CAP_HI:
             if(size == 4)
@@ -164,18 +227,21 @@ pci_nvme_read_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, int size)
                 assert(0);
             }
 
+        case NVME_CR_CSTS:
+            if(size == 4)
+            {
+                return (uint64_t)sc->regs.csts.raw;
+            }
+            else 
+            {
+                assert(0);
+            }
+
         default:
-            DPRINTF("unknown offset value: 0x%lx in %s\n", regoff, __func__);
+            DPRINTF("unknown regoff value: 0x%lx, size %d in %s\n", regoff, size, __func__);
             assert(0);
     }
 
-    return 0;
-}
-
-static uint64_t
-pci_nvme_read_bar_4(struct pci_nvme_softc *sc, uint64_t regoff, int size)
-{
-    assert(0);
     return 0;
 }
 
@@ -188,8 +254,10 @@ pci_nvme_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
     if(baridx == pci_msix_table_bar(pi) ||
             baridx == pci_msix_pba_bar(pi))
     {
+        DPRINTF("msix: regoff 0x%lx, size %d\n", regoff, size);
         return pci_emul_msix_tread(pi, regoff, size);
     }
+    DPRINTF("read regoff 0x%lx, size %d\n", regoff, size);
 
     switch (baridx) {
         case 0:
