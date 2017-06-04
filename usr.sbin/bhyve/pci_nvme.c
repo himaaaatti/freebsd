@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <assert.h>
+#include <pthread.h>
+
+#include <machine/vmm.h>
+#include <vmmapi.h>
 
 #include <dev/nvme/nvme.h>
 
@@ -39,6 +44,8 @@ enum nvme_controller_register_offsets {
 
 struct pci_nvme_softc {
     struct nvme_registers regs;
+    uintptr_t asq_base;
+    uintptr_t acq_base;
 };
 
 static void
@@ -59,7 +66,7 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
     // for NVMe Controller Registers
-    if(pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x1000))
+    if(pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f))
     {
         DPRINTF("error is occured in pci_emul_alloc_bar\n");
         return 1;
@@ -82,9 +89,47 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     return 0;
 }
 
-static void 
-pci_nvme_write_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value, int size)
+static void
+pci_nvme_setup_controller(struct vmctx *ctx, struct pci_nvme_softc *sc)
 {
+    //TODO
+    sc->regs.aqa.bits.acqs;
+    sc->asq_base = (uintptr_t)vm_map_gpa(ctx, sc->regs.asq, sc->regs.aqa.bits.asqs);
+    sc->acq_base = (uintptr_t)vm_map_gpa(ctx, sc->regs.acq, sc->regs.aqa.bits.acqs);
+
+    sc->regs.csts.bits.rdy = 1;
+}
+
+static void 
+pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value, int size)
+{
+
+    // write value to doorbell register
+    if(regoff >= NVME_CR_IO_QUEUE_BASE && regoff <= 0x100f)
+    {
+        int offset = regoff - 0x1000;
+        // submission queue
+        if(!(offset % 2))
+        {
+            //TODO
+            // admin queue
+            if((offset / 8) == 0)
+            {
+            }
+        }
+        // completion queue
+        else 
+        {
+            //TODO
+            // admin queue
+            if((offset / 8) == 0)
+            {
+            }
+        }
+        assert(0);
+        return;
+    }
+
     switch(regoff) 
     {
         case NVME_CR_CC:
@@ -103,6 +148,18 @@ pci_nvme_write_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value,
                 // - 0 -> 1
                 //      - When a controller is ready to process commands, the controller set '1' to CSTS.RDY.
                 //
+
+                if((sc->regs.cc.bits.en == 0) && (value & 0x1)) 
+                {
+                    pci_nvme_setup_controller(ctx, sc);
+                }
+
+                if((sc->regs.cc.bits.en == 1) && !(value & 0x1))
+                {
+                    sc->regs.csts.bits.rdy = 0;
+                    //TODO
+                    assert(0);
+                }
 
                 sc->regs.cc.raw = (uint32_t)value;
                 return;
@@ -134,7 +191,7 @@ pci_nvme_write_bar_0(struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value,
         case NVME_CR_ASQ_HI:
             if(size == 4)
             {
-                sc->regs.asq = (sc->regs.asq & 0x00000000ffffffff) | (value << 32);
+                sc->regs.asq = (sc->regs.asq & 0x00000000ffffffff) | ((0xfffff000 & value) << 32);
                 return;
             }
             else {
@@ -185,7 +242,7 @@ pci_nvme_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
     switch(baridx)
     {
         case 0:
-            pci_nvme_write_bar_0(sc, regoff, value, size);
+            pci_nvme_write_bar_0(ctx, sc, regoff, value, size);
             break;
 
         default:
