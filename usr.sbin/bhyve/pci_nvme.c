@@ -122,6 +122,7 @@ struct pci_nvme_softc {
     struct nvme_features features;
     struct pci_devinst *pi;
     uint16_t completion_queue_head;
+    uint16_t submission_queue_tail;
     uintptr_t asq_base;
     uintptr_t acq_base;
 };
@@ -240,7 +241,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
 {
     struct nvme_command *command = (struct nvme_command *)(sc->asq_base + sizeof(struct nvme_command) * (value - 1));
     struct nvme_completion *cmp_entry = 
-        (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->completion_queue_head);
+        (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->submission_queue_tail);
 
     memset(cmp_entry, sizeof(struct nvme_command), 0);
     cmp_entry->sqid = 0;
@@ -271,7 +272,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     // MSI-X interrupt
 /*     cmp_entry-> */
 
-    sc->completion_queue_head++;
+    sc->submission_queue_tail++;
 }
 
 static void 
@@ -279,32 +280,33 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t rego
 {
 
     // write value to doorbell register
+    // TODO limit of doorbell register address is depend on the number of queue pairs.
     if(regoff >= NVME_CR_IO_QUEUE_BASE && regoff <= 0x100f)
     {
-        int offset = regoff - 0x1000;
+        int queue_offset = regoff - 0x1000;
         DPRINTF("regoff 0x%lx\n", regoff);
-        // submission queue
-        if(!(offset % 2))
+        int is_completion = (queue_offset / 4) % 2;
+        // completion doorbell
+        if(is_completion)
         {
-            //TODO
-            // admin queue
-            if((offset / 8) == 0)
+            if(queue_offset == 4)
             {
-                //TODO have to be run as thread
-                pci_nvme_execute_admin_command(sc, value);
+                DPRINTF("completion doorbell is knocked\n");
+                sc->completion_queue_head++;
                 return;
             }
             assert(0);
         }
-        // completion queue
-        else 
+        // submission doorbell
+        else
         {
-            //TODO
-            // admin queue
-            if((offset / 8) == 0)
+            // admin
+            if(queue_offset == 0) 
             {
-                assert(0);
+                pci_nvme_execute_admin_command(sc, value);
+                return;
             }
+            assert(0);
         }
         assert(0);
         return;
