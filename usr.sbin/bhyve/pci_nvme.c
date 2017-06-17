@@ -51,7 +51,6 @@ const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset)
             return "CAP_LOW";
         case NVME_CR_CAP_HI:
             return "CAP_HI";
-
         case NVME_CR_CC:
             return "CC";
         case NVME_CR_CSTS:
@@ -72,6 +71,16 @@ const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset)
             assert(0);
     }
 }
+
+enum nvme_cmd_identify_cdw10 {
+    NVME_CMD_IDENTIFY_CDW10_CNTID   = 0xffff0000,
+    NVME_CMD_IDENTIFY_CDW10_RSV     = 0x0000ff00,
+    NVME_CMD_IDENTIFY_CDW10_CNS     = 0x000000ff,
+};
+
+enum nvme_cmd_identify_data {
+    NVME_CMD_IDENTIFY_CNS_CONTROLLER    = 0x1,
+};
 
 enum nvme_cc_bits {
     NVME_CC_EN      = 0x00000001,
@@ -117,6 +126,10 @@ struct nvme_features {
     } __packed async_event_config;
 };
 
+/* struct nvme_identify_data { */
+/*      */
+/* }; */
+
 struct pci_nvme_softc {
     struct nvme_registers regs;
     struct nvme_features features;
@@ -125,6 +138,7 @@ struct pci_nvme_softc {
     uint16_t submission_queue_tail;
     uintptr_t asq_base;
     uintptr_t acq_base;
+    struct nvme_controller_data controller_data;
 };
 
 static void
@@ -180,6 +194,7 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 	sc = calloc(1, sizeof(struct pci_nvme_softc));
 	pi->pi_arg = sc;
+    pi->pi_vmctx = ctx;
     sc->pi = pi;
 
     sc->regs.cap_hi.raw = 0x00000000;
@@ -237,17 +252,43 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
 }
 
 static void
+execute_identify_command(struct pci_nvme_softc *sc, 
+        struct nvme_command *command, struct nvme_completion *cmp_entry)
+{
+    DPRINTF("Identify command\n");
+    DPRINTF("cdw10 0x%x, dptr 0x%lx, 0x%lx", command->cdw10, command->prp1, command->prp2);
+    uintptr_t dest_addr = (uintptr_t)vm_map_gpa(sc->pi->pi_vmctx,
+                command->prp1, sizeof(struct nvme_controller_data));
+
+    switch(command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS)
+    {
+/*         case 0x00: */
+        case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
+            memcpy((struct nvme_controller_data*)dest_addr,
+                    &sc->controller_data, sizeof(struct nvme_controller_data));
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, 0);
+            return;
+        default:
+            assert(0 && "[CNS] not inplemented");
+    }
+
+    assert(0);
+}
+
+static void
 pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
 {
     struct nvme_command *command = (struct nvme_command *)(sc->asq_base + sizeof(struct nvme_command) * (value - 1));
     struct nvme_completion *cmp_entry = 
-        (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->submission_queue_tail);
+        (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->completion_queue_head);
 
-    memset(cmp_entry, sizeof(struct nvme_command), 0);
+/*     memset(cmp_entry, sizeof(struct nvme_command), 0); */
     cmp_entry->sqid = 0;
     cmp_entry->sqhd = value - 1;
     cmp_entry->cid = command->cid;
-    cmp_entry->status.p = 0x1;
+    cmp_entry->status.p = !cmp_entry->status.p;
 
     DPRINTF("command opecode (opc) is 0x%x, dword 0x%x, doorbell 0x%lx\n",
             command->opc, command->cdw10, value);
@@ -259,12 +300,15 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
         case NVME_OPC_CREATE_IO_SQ:
             assert(0);
             break;
+        case NVME_OPC_IDENTIFY:
+            execute_identify_command(sc, command, cmp_entry);
+            break;
         case NVME_OPC_SET_FEATURES:
             execute_set_feature_command(sc, command, cmp_entry);
             break;
 
         default:
-            assert(0 && "the command is not implemented");
+            assert(0 && "the admin command is not implemented");
     }
 
     //TODO send completion 
@@ -272,7 +316,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     // MSI-X interrupt
 /*     cmp_entry-> */
 
-    sc->submission_queue_tail++;
+    sc->completion_queue_head++;
 }
 
 static void 
@@ -292,7 +336,6 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t rego
             if(queue_offset == 4)
             {
                 DPRINTF("completion doorbell is knocked\n");
-                sc->completion_queue_head++;
                 return;
             }
             assert(0);
