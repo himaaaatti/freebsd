@@ -218,7 +218,12 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
             cmp_entry->status.sct = 0x0;
             if(pci_msix_enabled(sc->pi)) {
                 DPRINTF("generate msix, table_count %d, \n", sc->pi->pi_msix.table_count);
+/*                 for(int i=0; i<2048; ++i) { */
                 pci_generate_msix(sc->pi, 0);
+/*                 } */
+            }
+            else {
+                assert(0 && "pci_msix is disable?");
             }
 
             break;
@@ -240,7 +245,8 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     memset(cmp_entry, sizeof(struct nvme_command), 0);
     cmp_entry->sqid = 0;
     cmp_entry->sqhd = value - 1;
-    cmp_entry->cid = value - 1;
+    cmp_entry->cid = command->cid;
+    cmp_entry->status.p = 0x1;
 
     DPRINTF("command opecode (opc) is 0x%x, dword 0x%x, doorbell 0x%lx\n",
             command->opc, command->cdw10, value);
@@ -265,7 +271,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     // MSI-X interrupt
 /*     cmp_entry-> */
 
-    sc->completion_queue_head += 1;
+    sc->completion_queue_head++;
 }
 
 static void 
