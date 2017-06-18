@@ -124,6 +124,11 @@ struct nvme_features {
             uint32_t reserved       :21; 
         } __packed bits;
     } __packed async_event_config;
+
+    struct {
+        uint16_t over;
+        uint16_t under;
+    } temparture_threshold;
 };
 
 /* struct nvme_identify_data { */
@@ -181,6 +186,14 @@ pci_nvme_reset(struct pci_nvme_softc *sc)
     sc->acq_base = 0;
 }
 
+static void
+initialize_feature(struct pci_nvme_softc *sc)
+{
+    sc->features.temparture_threshold.over = 0xffff;
+    sc->features.temparture_threshold.under = 0x0000;
+    //TODO initialize other values
+}
+
 static int 
 pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
@@ -222,6 +235,8 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     int number_of_submission_queues = 4;
     sc->sqs_info = calloc(number_of_submission_queues, sizeof(struct nvme_submission_queue_info));
 
+    initialize_feature(sc);
+
     return 0;
 }
 
@@ -254,21 +269,60 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
             cmp_entry->status.sct = 0x0;
             if(pci_msix_enabled(sc->pi)) {
                 DPRINTF("generate msix, table_count %d, \n", sc->pi->pi_msix.table_count);
-/*                 for(int i=0; i<2048; ++i) { */
                 pci_generate_msix(sc->pi, 0);
-/*                 } */
             }
             else {
                 assert(0 && "pci_msix is disable?");
             }
-
             break;
 
-/*         case NVME_FEAT_ASYNC_EVENT_CONFIGURATION: */
-/*             break; */
         default:
             assert(0 && "this feature is not implemented");
     }
+}
+
+enum temp_threshold_cdw11 {
+    NVME_TEMP_THRESHOLD_TMPTH   = 0x0000ffff,
+    NVME_TEMP_THRESHOLD_TMPSEL  = 0x000f0000,
+    NVME_TEMP_THRESHOLD_THSEL   = 0x00300000,
+    NVME_TEMP_THRESHOLD_RESERVED= 0xffc00000,
+};
+
+static void 
+execute_get_feature_command(struct pci_nvme_softc *sc,
+        struct nvme_command *command, struct nvme_completion *cmp_entry)
+{
+    enum nvme_feature feature = command->cdw10 & 0xf;
+    switch (feature)
+    {
+        case NVME_FEAT_TEMPERATURE_THRESHOLD:
+        {
+            uint8_t thsel = (command->cdw11 & NVME_TEMP_THRESHOLD_THSEL) >> 20;
+            // over temparture threshold
+            if(thsel == 0x00)
+            {
+                cmp_entry->cdw0 = sc->features.temparture_threshold.over;
+            }
+            // under temparture threshold
+            else if(thsel == 0x1){
+                cmp_entry->cdw0 = sc->features.temparture_threshold.under;
+            }
+            else {
+                assert("the thsel is invalied");
+            }
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, 0);
+            break;
+        }
+
+            break;
+        default:
+            DPRINTF("feature number: 0x%x\n", feature);
+            assert(0 && "not implemented");
+    }
+
+    return;
 }
 
 static void
@@ -397,6 +451,9 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
             break;
         case NVME_OPC_SET_FEATURES:
             execute_set_feature_command(sc, command, cmp_entry);
+            break;
+        case NVME_OPC_GET_FEATURES:
+            execute_get_feature_command(sc, command, cmp_entry);
             break;
 
         default:
