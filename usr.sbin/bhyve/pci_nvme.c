@@ -135,6 +135,12 @@ struct nvme_completion_queue_info {
     uint16_t size;
 };
 
+struct nvme_submission_queue_info {
+    uintptr_t base_addr;
+    uint16_t size;
+    uint16_t completion_qid;
+};
+
 struct pci_nvme_softc {
     struct nvme_registers regs;
     struct nvme_features features;
@@ -145,6 +151,7 @@ struct pci_nvme_softc {
     uintptr_t acq_base;
     struct nvme_controller_data controller_data;
     struct nvme_completion_queue_info *cqs_info;
+    struct nvme_submission_queue_info *sqs_info;
 };
 
 static void
@@ -211,6 +218,9 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
     int number_of_completion_queues = 4;
     sc->cqs_info = calloc(number_of_completion_queues, sizeof(struct nvme_completion_queue_info));
+
+    int number_of_submission_queues = 4;
+    sc->sqs_info = calloc(number_of_submission_queues, sizeof(struct nvme_submission_queue_info));
 
     return 0;
 }
@@ -302,7 +312,7 @@ nvme_execute_create_io_cq_command(struct pci_nvme_softc *sc,
     //  IEN
     //  IV
     DPRINTF("interrupt vector 0x%x\n", command->cdw11 >> 16);
-    if(command->cdw10 & NVME_CREATE_IO_CQ_CDW11_PC) {
+    if(command->cdw11 & NVME_CREATE_IO_CQ_CDW11_PC) {
         uint16_t qid = command->cdw10 & 0xffff;
 
         if(sc->cqs_info[qid].base_addr != (uintptr_t)NULL)
@@ -316,13 +326,47 @@ nvme_execute_create_io_cq_command(struct pci_nvme_softc *sc,
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
         pci_generate_msix(sc->pi, 0);
-        return;
     }
     else {
         assert(0 && "not implemented");
     }
 
-    assert(0);
+    return;
+}
+
+enum create_io_sq_cdw11 {
+    NVME_CREATE_IO_SQ_CDW11_PC      = 0x00000001,
+    NVME_CREATE_IO_SQ_CDW11_QPRIO   = 0x00000060,
+    NVME_CREATE_IO_SQ_CDW11_RSV     = 0x0000ff80,
+    NVME_CREATE_IO_SQ_CDW11_CQID    = 0xffff0000,
+};
+
+static void
+nvme_execute_create_io_sq_command(struct pci_nvme_softc *sc,
+        struct nvme_command *command, struct nvme_completion *cmp_entry)
+{
+    if(command->cdw11 & NVME_CREATE_IO_SQ_CDW11_PC) {
+        uint16_t qid = command->cdw10 & 0xffff;
+
+        //TODO
+/*         uint8_t queue_priority = (command->cdw11 & NVME_CREATE_IO_SQ_CDW11_QPRIO) >> 1; */
+        if(sc->sqs_info[qid].base_addr != (uintptr_t)NULL) 
+        {
+            assert(0);
+        }
+        uint16_t cqid = command->cdw11 >> 16;
+        sc->sqs_info[qid].base_addr = command->prp1;
+        sc->sqs_info[qid].size = command->cdw10 & 0xffff;
+        sc->sqs_info[qid].completion_qid = cqid;
+
+        cmp_entry->status.sc = 0x00;
+        cmp_entry->status.sct = 0x0;
+        pci_generate_msix(sc->pi, 0);
+    }
+    else {
+        assert(0 && "not implemented");
+    }
+    return;
 }
 
 static void
@@ -342,11 +386,8 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
             command->opc, command->cdw10, value);
     switch (command->opc)
     {
-        case NVME_OPC_DELETE_IO_SQ:
-            assert(0);
-            break;
         case NVME_OPC_CREATE_IO_SQ:
-            assert(0);
+            nvme_execute_create_io_sq_command(sc, command, cmp_entry);
             break;
         case NVME_OPC_CREATE_IO_CQ:
             nvme_execute_create_io_cq_command(sc, command, cmp_entry);
