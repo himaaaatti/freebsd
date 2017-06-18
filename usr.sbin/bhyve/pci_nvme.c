@@ -130,6 +130,11 @@ struct nvme_features {
 /*      */
 /* }; */
 
+struct nvme_completion_queue_info {
+    uintptr_t base_addr;
+    uint16_t size;
+};
+
 struct pci_nvme_softc {
     struct nvme_registers regs;
     struct nvme_features features;
@@ -139,6 +144,7 @@ struct pci_nvme_softc {
     uintptr_t asq_base;
     uintptr_t acq_base;
     struct nvme_controller_data controller_data;
+    struct nvme_completion_queue_info *cqs_info;
 };
 
 static void
@@ -175,6 +181,7 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 #ifdef NVME_DEBUG
 	dbg = fopen("/tmp/nvme_emu_log", "w+");
+    DPRINTF("--- start nvme controller ---\n");
 #endif
 
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
@@ -201,6 +208,9 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     sc->regs.cap_lo.raw = 0x02000000;
 
     pci_nvme_reset(sc);
+
+    int number_of_completion_queues = 4;
+    sc->cqs_info = calloc(number_of_completion_queues, sizeof(struct nvme_completion_queue_info));
 
     return 0;
 }
@@ -252,7 +262,7 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
 }
 
 static void
-execute_identify_command(struct pci_nvme_softc *sc, 
+nvme_execute_identify_command(struct pci_nvme_softc *sc, 
         struct nvme_command *command, struct nvme_completion *cmp_entry)
 {
     DPRINTF("Identify command\n");
@@ -272,6 +282,44 @@ execute_identify_command(struct pci_nvme_softc *sc,
             return;
         default:
             assert(0 && "[CNS] not inplemented");
+    }
+
+    assert(0);
+}
+
+enum create_io_cq_cdw11 {
+    NVME_CREATE_IO_CQ_CDW11_PC  = 0x00000001, 
+    NVME_CREATE_IO_CQ_CDW11_IEN = 0x00000002,
+    NVME_CREATE_IO_CQ_CDW11_RSV = 0x0000fffc,
+    NVME_CREATE_IO_CQ_CDW11_IV  = 0xffff0000,
+};
+
+static void 
+nvme_execute_create_io_cq_command(struct pci_nvme_softc *sc, 
+        struct nvme_command *command, struct nvme_completion *cmp_entry)
+{
+    //TODO
+    //  IEN
+    //  IV
+    DPRINTF("interrupt vector 0x%x\n", command->cdw11 >> 16);
+    if(command->cdw10 & NVME_CREATE_IO_CQ_CDW11_PC) {
+        uint16_t qid = command->cdw10 & 0xffff;
+
+        if(sc->cqs_info[qid].base_addr != (uintptr_t)NULL)
+        {
+            assert(0 && "the completion queue is already used");
+        }
+
+        sc->cqs_info[qid].base_addr = command->prp1;
+        sc->cqs_info[qid].size = command->cdw10 >> 16;
+
+        cmp_entry->status.sc = 0x00;
+        cmp_entry->status.sct = 0x0;
+        pci_generate_msix(sc->pi, 0);
+        return;
+    }
+    else {
+        assert(0 && "not implemented");
     }
 
     assert(0);
@@ -300,8 +348,11 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
         case NVME_OPC_CREATE_IO_SQ:
             assert(0);
             break;
+        case NVME_OPC_CREATE_IO_CQ:
+            nvme_execute_create_io_cq_command(sc, command, cmp_entry);
+            break;
         case NVME_OPC_IDENTIFY:
-            execute_identify_command(sc, command, cmp_entry);
+            nvme_execute_identify_command(sc, command, cmp_entry);
             break;
         case NVME_OPC_SET_FEATURES:
             execute_set_feature_command(sc, command, cmp_entry);
