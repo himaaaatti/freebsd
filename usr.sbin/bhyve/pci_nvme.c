@@ -424,7 +424,14 @@ nvme_execute_create_io_sq_command(struct pci_nvme_softc *sc,
     else {
         assert(0 && "not implemented");
     }
-    return;
+}
+
+static void 
+execute_async_event_request_command(struct pci_nvme_softc *sc,
+        struct nvme_command *command, struct nvme_completion *cmp_entry)
+{
+    //TODO
+    // when some events are occured, the controller send notify 
 }
 
 static void
@@ -434,7 +441,6 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     struct nvme_completion *cmp_entry = 
         (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->completion_queue_head);
 
-/*     memset(cmp_entry, sizeof(struct nvme_command), 0); */
     cmp_entry->sqid = 0;
     cmp_entry->sqhd = value - 1;
     cmp_entry->cid = command->cid;
@@ -459,15 +465,12 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
         case NVME_OPC_GET_FEATURES:
             execute_get_feature_command(sc, command, cmp_entry);
             break;
-
+        case NVME_OPC_ASYNC_EVENT_REQUEST:
+            execute_async_event_request_command(sc, command, cmp_entry);
+            break;
         default:
             assert(0 && "the admin command is not implemented");
     }
-
-    //TODO send completion 
-    // write completion entry
-    // MSI-X interrupt
-/*     cmp_entry-> */
 
     sc->completion_queue_head++;
 }
