@@ -132,6 +132,15 @@ struct nvme_features {
             uint16_t under;
         } __packed bits;
     } __packed temparture_threshold;
+
+    union {
+        uint32_t raw;
+        struct {
+            uint8_t thr         :8;
+            uint8_t time        :8;
+            uint16_t reserved   :16;
+        } __packed bits;
+    } __packed interrupt_coalscing;
 };
 
 struct nvme_completion_queue_info {
@@ -190,6 +199,8 @@ initialize_feature(struct pci_nvme_softc *sc)
 {
     sc->features.temparture_threshold.bits.over = 0xffff;
     sc->features.temparture_threshold.bits.under = 0x0000;
+    
+    sc->features.interrupt_coalscing.raw = 0;
     //TODO initialize other values
 }
 
@@ -278,6 +289,13 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
             sc->features.async_event_config.raw = command->cdw11;
             cmp_entry->status.sc = 0x00;
             cmp_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, 0);
+            break;
+
+        case NVME_FEAT_INTERRUPT_COALESCING:
+            DPRINTF("interrupt coalescing cdw11 0x%x\n", command->cdw11);
+            sc->features.interrupt_coalscing.bits.thr = command->cdw11 & 0xff;
+            sc->features.interrupt_coalscing.bits.time = (command->cdw11 >> 8) & 0xff;
             pci_generate_msix(sc->pi, 0);
             break;
 
@@ -466,6 +484,8 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
             execute_get_feature_command(sc, command, cmp_entry);
             break;
         case NVME_OPC_ASYNC_EVENT_REQUEST:
+            //XXX this is a dirty hack.... should be fixed...
+            cmp_entry->status.p = !cmp_entry->status.p;
             execute_async_event_request_command(sc, command, cmp_entry);
             break;
         default:
