@@ -72,6 +72,46 @@ const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset)
     }
 }
 
+const char* get_admin_command_text(enum nvme_admin_opcode opc)
+{
+    switch(opc) 
+    {
+        case NVME_OPC_DELETE_IO_SQ:
+            return "delete i/o submission queue";
+        case NVME_OPC_CREATE_IO_SQ:
+            return "create i/o submission queue";
+        case NVME_OPC_GET_LOG_PAGE:
+            return "get log page";
+        case NVME_OPC_DELETE_IO_CQ:
+            return "delete i/o completion queue";
+        case NVME_OPC_CREATE_IO_CQ:
+            return "create i/o completion queue";
+        case NVME_OPC_IDENTIFY:
+            return "identify";
+        case NVME_OPC_ABORT:
+            return "abort";
+        case NVME_OPC_SET_FEATURES:
+            return "set feature";
+        case NVME_OPC_GET_FEATURES:
+            return "get feature";
+        case NVME_OPC_ASYNC_EVENT_REQUEST:
+            return "async event request";
+        case NVME_OPC_FIRMWARE_ACTIVATE:
+            return "firmware activate";
+        case NVME_OPC_FIRMWARE_IMAGE_DOWNLOAD:
+            return "firmware image download";
+        case NVME_OPC_FORMAT_NVM:
+            return "format nvm";
+        case NVME_OPC_SECURITY_SEND:
+            return "security send";
+        case NVME_OPC_SECURITY_RECEIVE:
+            return "security receive";
+
+        default:
+            assert(0 && "unknown opc\n") ;
+    }
+}
+
 enum nvme_cmd_identify_cdw10 {
     NVME_CMD_IDENTIFY_CDW10_CNTID   = 0xffff0000,
     NVME_CMD_IDENTIFY_CDW10_RSV     = 0x0000ff00,
@@ -294,6 +334,8 @@ execute_set_feature_command(struct pci_nvme_softc *sc,
 
         case NVME_FEAT_INTERRUPT_COALESCING:
             DPRINTF("interrupt coalescing cdw11 0x%x\n", command->cdw11);
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
             sc->features.interrupt_coalscing.bits.thr = command->cdw11 & 0xff;
             sc->features.interrupt_coalscing.bits.time = (command->cdw11 >> 8) & 0xff;
             pci_generate_msix(sc->pi, 0);
@@ -358,7 +400,6 @@ nvme_execute_identify_command(struct pci_nvme_softc *sc,
 
     switch(command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS)
     {
-/*         case 0x00: */
         case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
             memcpy((struct nvme_controller_data*)dest_addr,
                     &sc->controller_data, sizeof(struct nvme_controller_data));
@@ -464,8 +505,8 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     cmp_entry->cid = command->cid;
     cmp_entry->status.p = !cmp_entry->status.p;
 
-    DPRINTF("command opecode (opc) is 0x%x, dword 0x%x, doorbell 0x%lx\n",
-            command->opc, command->cdw10, value);
+    DPRINTF("command opecode is 0x%x (%s), dword 0x%x, doorbell 0x%lx\n",
+            command->opc, get_admin_command_text(command->opc), command->cdw10, value);
     switch (command->opc)
     {
         case NVME_OPC_CREATE_IO_SQ:
@@ -487,6 +528,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
             //XXX this is a dirty hack.... should be fixed...
             cmp_entry->status.p = !cmp_entry->status.p;
             execute_async_event_request_command(sc, command, cmp_entry);
+            sc->completion_queue_head--;
             break;
         default:
             assert(0 && "the admin command is not implemented");
