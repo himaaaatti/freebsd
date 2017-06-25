@@ -112,6 +112,28 @@ const char* get_admin_command_text(enum nvme_admin_opcode opc)
     }
 }
 
+const char* get_nvm_command_text(enum nvme_nvm_opcode opc)
+{
+    switch(opc)
+    {
+        case NVME_OPC_FLUSH:
+            return "flush";
+        case NVME_OPC_WRITE:
+            return "write";
+        case NVME_OPC_READ:
+            return "read";
+        case NVME_OPC_WRITE_UNCORRECTABLE:
+            return "write uncorrectable";
+        case NVME_OPC_COMPARE:
+            return "compare";
+        case NVME_OPC_DATASET_MANAGEMENT:
+            return "dataset management";
+
+        default: 
+            assert(0 && "unknown opc");
+    }
+}
+
 enum nvme_cmd_identify_cdw10 {
     NVME_CMD_IDENTIFY_CDW10_CNTID   = 0xffff0000,
     NVME_CMD_IDENTIFY_CDW10_RSV     = 0x0000ff00,
@@ -187,6 +209,7 @@ struct nvme_features {
 struct nvme_completion_queue_info {
     uintptr_t base_addr;
     uint16_t size;
+    uint16_t head;
 };
 
 struct nvme_submission_queue_info {
@@ -321,7 +344,7 @@ pci_nvme_setup_controller(struct vmctx *ctx, struct pci_nvme_softc *sc)
     sc->asq_base = (uintptr_t)vm_map_gpa(
             ctx, sc->regs.asq, sizeof(struct nvme_command) * sc->regs.aqa.bits.asqs);
     sc->acq_base = (uintptr_t)vm_map_gpa(
-            ctx, sc->regs.acq, sizeof(struct nvme_command) * sc->regs.aqa.bits.acqs);
+            ctx, sc->regs.acq, sizeof(struct nvme_completion) * sc->regs.aqa.bits.acqs);
 
     sc->regs.csts.bits.rdy = 1;
 }
@@ -469,8 +492,12 @@ nvme_execute_create_io_cq_command(struct pci_nvme_softc *sc,
             assert(0 && "the completion queue is already used");
         }
 
-        sc->cqs_info[qid].base_addr = command->prp1;
-        sc->cqs_info[qid].size = command->cdw10 >> 16;
+        uint16_t queue_size = command->cdw10 >> 16;
+        sc->cqs_info[qid].base_addr = (uintptr_t)vm_map_gpa(
+                sc->pi->pi_vmctx,
+                command->prp1,
+                sizeof(struct nvme_completion) * queue_size);
+        sc->cqs_info[qid].size = queue_size;
 
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
@@ -495,18 +522,27 @@ nvme_execute_create_io_sq_command(struct pci_nvme_softc *sc,
         struct nvme_command *command, struct nvme_completion *cmp_entry)
 {
     if(command->cdw11 & NVME_CREATE_IO_SQ_CDW11_PC) {
+
         uint16_t qid = command->cdw10 & 0xffff;
+        DPRINTF("qid: %x, base_addr %lx\n", qid, command->prp1);
 
         //TODO
 /*         uint8_t queue_priority = (command->cdw11 & NVME_CREATE_IO_SQ_CDW11_QPRIO) >> 1; */
-        if(sc->sqs_info[qid].base_addr != (uintptr_t)NULL) 
+        struct nvme_submission_queue_info *sq_info = &sc->sqs_info[qid];
+        if(sq_info->base_addr != (uintptr_t)NULL) 
         {
             assert(0);
         }
         uint16_t cqid = command->cdw11 >> 16;
-        sc->sqs_info[qid].base_addr = command->prp1;
-        sc->sqs_info[qid].size = command->cdw10 & 0xffff;
-        sc->sqs_info[qid].completion_qid = cqid;
+        uint16_t queue_size = command->cdw10 >> 16;
+        sq_info->base_addr = (uintptr_t)vm_map_gpa( 
+                sc->pi->pi_vmctx,
+                command->prp1,
+                sizeof(struct nvme_command) * queue_size);
+        sq_info->size = queue_size;
+        sq_info->completion_qid = cqid;
+
+        DPRINTF("sc->sqs_info[%d].base_addr: %lx\n", qid, sc->sqs_info[qid].base_addr);
 
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
@@ -528,7 +564,11 @@ execute_async_event_request_command(struct pci_nvme_softc *sc,
 static void
 pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
 {
-    struct nvme_command *command = (struct nvme_command *)(sc->asq_base + sizeof(struct nvme_command) * (value - 1));
+    struct nvme_command *command = 
+        (struct nvme_command *)(
+                sc->asq_base + sizeof(struct nvme_command) * 
+                (value - 1));
+
     struct nvme_completion *cmp_entry = 
         (struct nvme_completion *)(sc->acq_base + sizeof(struct nvme_completion) * sc->completion_queue_head);
 
@@ -537,8 +577,7 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     cmp_entry->cid = command->cid;
     cmp_entry->status.p = !cmp_entry->status.p;
 
-    DPRINTF("command opecode is 0x%x (%s), dword 0x%x, doorbell 0x%lx\n",
-            command->opc, get_admin_command_text(command->opc), command->cdw10, value);
+    DPRINTF("[admin command] %s\n", get_admin_command_text(command->opc));
     switch (command->opc)
     {
         case NVME_OPC_CREATE_IO_SQ:
@@ -569,6 +608,41 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
     sc->completion_queue_head++;
 }
 
+static void
+pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc, 
+        uint16_t qid, uint64_t value)
+{
+    struct nvme_submission_queue_info *sq_info = &sc->sqs_info[qid];
+
+    DPRINTF("value: %lx, qid: 0x%x, base_addr: 0x%lx\n",
+            value, qid, sq_info->base_addr);
+
+    struct nvme_command *command = 
+        (struct nvme_command*)(sq_info->base_addr + 
+        sizeof(struct nvme_command) * (value - 1));
+
+    uint16_t completion_qid = sq_info->completion_qid;
+    struct nvme_completion_queue_info *cq_info = &sc->cqs_info[completion_qid];
+    struct nvme_completion *completion_entry = 
+        (struct nvme_completion*)(cq_info->base_addr +
+                sizeof(struct nvme_completion) * cq_info->head);
+
+    DPRINTF("[nvm command] opc: 0x%x, qid: 0x%x, value 0x%lx\n",
+        command->opc, qid, value);
+
+    switch (command->opc)
+    {
+        case NVME_OPC_DATASET_MANAGEMENT:
+            completion_entry->status.sc = 0x00;
+            completion_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, sq_info->completion_qid);
+            return;
+
+        default:
+            assert(0 && "the nvme command is not implemented yet");
+    }
+}
+
 static void 
 pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t regoff, uint64_t value, int size)
 {
@@ -577,32 +651,41 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t rego
     // TODO limit of doorbell register address is depend on the number of queue pairs.
     if(regoff >= NVME_CR_IO_QUEUE_BASE && regoff <= 0x100f)
     {
-        int queue_offset = regoff - 0x1000;
+        int queue_offset = regoff - 0x1000; // 0x1000 is NVME_CR_IO_QUEUE_BASE
         DPRINTF("regoff 0x%lx\n", regoff);
+        int qid = queue_offset / 8; // 4 is doorbell register size
         int is_completion = (queue_offset / 4) % 2;
         // completion doorbell
         if(is_completion)
         {
-            if(queue_offset == 4)
+            DPRINTF("completion doorbell (%d) is knocked\n", qid);
+            if(qid == 0)
             {
-                DPRINTF("completion doorbell is knocked\n");
-                return;
+                //TODO
             }
-            assert(0);
+            else {
+                //TODO
+            }
+            return;
         }
         // submission doorbell
         else
         {
-            // admin
-            if(queue_offset == 0) 
+            // admin command
+            if(qid == 0) 
             {
                 pci_nvme_execute_admin_command(sc, value);
                 return;
             }
-            assert(0);
+            // nvme command
+            // TODO validate qid
+            else 
+            {
+                pci_nvme_execute_nvme_command(sc, qid, value);
+                return;
+            }
         }
         assert(0);
-        return;
     }
 
     DPRINTF("write %s, value %lx \n", get_nvme_cr_text(regoff), value);
@@ -793,7 +876,6 @@ pci_nvme_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
         DPRINTF("baridx: %d, msix: regoff 0x%lx, size %d\n", baridx, regoff, size);
         return pci_emul_msix_tread(pi, regoff, size);
     }
-/*     DPRINTF("read regoff 0x%lx, size %d\n", regoff, size); */
 
     switch (baridx) {
         case 0:
