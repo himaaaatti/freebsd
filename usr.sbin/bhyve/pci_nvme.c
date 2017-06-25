@@ -119,6 +119,7 @@ enum nvme_cmd_identify_cdw10 {
 };
 
 enum nvme_cmd_identify_data {
+    NVME_CMD_IDENTIFY_CNS_NAMESPACE     = 0x0,
     NVME_CMD_IDENTIFY_CNS_CONTROLLER    = 0x1,
 };
 
@@ -203,6 +204,7 @@ struct pci_nvme_softc {
     uintptr_t asq_base;
     uintptr_t acq_base;
     struct nvme_controller_data controller_data;
+    struct nvme_namespace_data namespace_data;
     struct nvme_completion_queue_info *cqs_info;
     struct nvme_submission_queue_info *sqs_info;
 };
@@ -244,6 +246,21 @@ initialize_feature(struct pci_nvme_softc *sc)
     //TODO initialize other values
 }
 
+static void
+initialize_identify(struct pci_nvme_softc *sc)
+{
+    sc->controller_data.nn = 0x4; // TODO consider this value
+    
+    // LBA format
+    sc->namespace_data.lbaf[0].ms = 0x00;
+    sc->namespace_data.lbaf[0].lbads =  10; //LBA data size is 2^n
+    sc->namespace_data.lbaf[0].rp = 0x0;
+
+    sc->namespace_data.nlbaf = 0x00;
+    sc->namespace_data.flbas.format = 0x00;
+    sc->namespace_data.nlbaf = 0x1;
+}
+
 static int 
 pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
@@ -253,6 +270,12 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	dbg = fopen("/tmp/nvme_emu_log", "w+");
     DPRINTF("--- start nvme controller ---\n");
 #endif
+
+    if(opts == NULL) {
+        fprintf(stderr, "pci_nvme: backing device required\n");
+        return 1;
+    }
+    DPRINTF("%s\n", opts);
 
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
@@ -285,6 +308,7 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     int number_of_submission_queues = 4;
     sc->sqs_info = calloc(number_of_submission_queues, sizeof(struct nvme_submission_queue_info));
 
+    initialize_identify(sc);
     initialize_feature(sc);
 
     return 0;
@@ -398,8 +422,16 @@ nvme_execute_identify_command(struct pci_nvme_softc *sc,
     uintptr_t dest_addr = (uintptr_t)vm_map_gpa(sc->pi->pi_vmctx,
                 command->prp1, sizeof(struct nvme_controller_data));
 
+    //TODO have to consider about completion queue entry content
     switch(command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS)
     {
+        case NVME_CMD_IDENTIFY_CNS_NAMESPACE:
+            memcpy((struct nvme_namespace_data*)dest_addr,
+                    &sc->namespace_data, sizeof(struct nvme_namespace_data));
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, 0);
+            return;
         case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
             memcpy((struct nvme_controller_data*)dest_addr,
                     &sc->controller_data, sizeof(struct nvme_controller_data));
