@@ -609,6 +609,20 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
 }
 
 static void
+nvme_nvm_command_read(struct pci_nvme_softc *sc, 
+        struct nvme_command *command, struct nvme_completion *completion_entry)
+{
+    uintptr_t starting_lba = ((uint64_t)command->cdw11 << 32) | command->cdw10;
+    uint16_t number_of_lba = command->cdw12 & 0xffff;
+
+    DPRINTF("slba %lx, nlba %x, size 2^%d\n", 
+            starting_lba, number_of_lba, 
+            sc->namespace_data.lbaf[0].lbads);
+
+    assert(0);
+}
+
+static void
 pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc, 
         uint16_t qid, uint64_t value)
 {
@@ -632,6 +646,9 @@ pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc,
 
     switch (command->opc)
     {
+        case NVME_OPC_READ:
+            nvme_nvm_command_read(sc, command, completion_entry);
+            return;
         case NVME_OPC_DATASET_MANAGEMENT:
             completion_entry->status.sc = 0x00;
             completion_entry->status.sct = 0x0;
