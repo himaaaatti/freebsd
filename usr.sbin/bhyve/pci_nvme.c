@@ -667,6 +667,7 @@ pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
     nreq->completion_entry.status.sc = 0x00;
 
     memcpy(completion_entry, &nreq->completion_entry, sizeof(struct nvme_completion));
+    completion_entry->status.p = !completion_entry->status.p;
 
     cq_info->head++;
     if(cq_info->head == cq_info->size)
