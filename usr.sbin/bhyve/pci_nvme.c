@@ -11,6 +11,7 @@
 #include <dev/nvme/nvme.h>
 
 #include "pci_emul.h"
+#include "block_if.h"
 
 #define NVME_DEBUG
 
@@ -210,13 +211,32 @@ struct nvme_completion_queue_info {
     uintptr_t base_addr;
     uint16_t size;
     uint16_t head;
+    uint16_t qid;
+    pthread_mutex_t	mtx;
+};
+
+struct pci_nvme_softc;
+// io request to block if.
+struct nvme_ioreq {
+    struct blockif_req io_req;
+    struct nvme_completion completion_entry;
+    struct nvme_completion_queue_info* cq_info;
+    struct pci_nvme_softc *sc;
 };
 
 struct nvme_submission_queue_info {
     uintptr_t base_addr;
     uint16_t size;
+    uint16_t qid;
     uint16_t completion_qid;
+    struct nvme_ioreq ioreq;
 };
+
+/* struct nvme_namespace { */
+/*     struct nvme_ioreq* ioreq; */
+/*     struct blockif_ctxt *b_ctxt; */
+/*     uint32_t nsid; */
+/* }; */
 
 struct pci_nvme_softc {
     struct nvme_registers regs;
@@ -230,7 +250,11 @@ struct pci_nvme_softc {
     struct nvme_namespace_data namespace_data;
     struct nvme_completion_queue_info *cqs_info;
     struct nvme_submission_queue_info *sqs_info;
+    // TODO: consider about below varibale
+    // How many do we need?
+	struct blockif_ctxt *bctx;
 };
+
 
 static void
 pci_nvme_reset(struct pci_nvme_softc *sc)
@@ -272,7 +296,7 @@ initialize_feature(struct pci_nvme_softc *sc)
 static void
 initialize_identify(struct pci_nvme_softc *sc)
 {
-    sc->controller_data.nn = 0x4; // TODO consider this value
+    sc->controller_data.nn = 0x2; // TODO consider this value
     
     // LBA format
     sc->namespace_data.lbaf[0].ms = 0x00;
@@ -288,6 +312,7 @@ static int
 pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
     struct pci_nvme_softc *sc;
+    struct blockif_ctxt *bctxt;
 
 #ifdef NVME_DEBUG
 	dbg = fopen("/tmp/nvme_emu_log", "w+");
@@ -300,18 +325,25 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     }
     DPRINTF("%s\n", opts);
 
+    // XXX: what is a second argument of blockif_open?.
+    bctxt = blockif_open(opts, ""); 
+    if(bctxt == NULL)
+    {
+        goto fail;
+    }
+
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
     // for NVMe Controller Registers
     if(pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f))
     {
         DPRINTF("error is occured in pci_emul_alloc_bar\n");
-        return 1;
+        goto fail;
     }
     if(pci_emul_add_msixcap(pi, 4, 4)) //XXX fix msix num 
     {
         DPRINTF("error is occured in pci_emul_add_msixcap\n");
-        return 1;
+        goto fail;
     }
     DPRINTF("table %d, pba %d\n", pci_msix_table_bar(pi), pci_msix_pba_bar(pi));
 
@@ -319,6 +351,8 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	pi->pi_arg = sc;
     pi->pi_vmctx = ctx;
     sc->pi = pi;
+
+    sc->bctx = bctxt;
 
     sc->regs.cap_hi.raw = 0x00000000;
     sc->regs.cap_lo.raw = 0x02000000;
@@ -335,6 +369,13 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
     initialize_feature(sc);
 
     return 0;
+
+fail:
+    blockif_close(bctxt);
+    free(sc->cqs_info);
+    free(sc->sqs_info);
+    free(sc);
+    return 1;
 }
 
 static void
@@ -498,6 +539,7 @@ nvme_execute_create_io_cq_command(struct pci_nvme_softc *sc,
                 command->prp1,
                 sizeof(struct nvme_completion) * queue_size);
         sc->cqs_info[qid].size = queue_size;
+        sc->cqs_info[qid].qid = qid;
 
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
@@ -541,7 +583,8 @@ nvme_execute_create_io_sq_command(struct pci_nvme_softc *sc,
                 sizeof(struct nvme_command) * queue_size);
         sq_info->size = queue_size;
         sq_info->completion_qid = cqid;
-
+        sq_info->qid = qid;
+        
         DPRINTF("sc->sqs_info[%d].base_addr: %lx\n", qid, sc->sqs_info[qid].base_addr);
 
         cmp_entry->status.sc = 0x00;
@@ -609,17 +652,68 @@ pci_nvme_execute_admin_command(struct pci_nvme_softc * sc, uint64_t value)
 }
 
 static void
-nvme_nvm_command_read(struct pci_nvme_softc *sc, 
-        struct nvme_command *command, struct nvme_completion *completion_entry)
+pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
 {
+	DPRINTF("%s %d\n", __func__, err);
+
+    struct nvme_ioreq *nreq = br->br_param;
+    struct nvme_completion_queue_info* cq_info = nreq->cq_info;
+
+    pthread_mutex_lock(&cq_info->mtx);
+    struct nvme_completion *completion_entry = 
+        (struct nvme_completion *) (cq_info->base_addr + sizeof(struct nvme_completion) * cq_info->head);
+
+    nreq->completion_entry.status.sct = 0x0;
+    nreq->completion_entry.status.sc = 0x00;
+
+    memcpy(completion_entry, &nreq->completion_entry, sizeof(struct nvme_completion));
+
+    cq_info->head++;
+    if(cq_info->head == cq_info->size)
+    {
+        cq_info->head = 0;
+    }
+    pthread_mutex_unlock(&cq_info->mtx);
+    pci_generate_msix(nreq->sc->pi, cq_info->qid);
+}
+
+static void
+nvme_nvm_command_read(
+        struct pci_nvme_softc *sc, 
+        struct nvme_command *command, 
+        struct nvme_submission_queue_info* sq_info,
+        uint16_t sqhd)
+{
+    int err = 0;
     uintptr_t starting_lba = ((uint64_t)command->cdw11 << 32) | command->cdw10;
     uint16_t number_of_lba = command->cdw12 & 0xffff;
+    ssize_t length = 2 << sc->namespace_data.lbaf[0].lbads;
 
     DPRINTF("slba %lx, nlba %x, size 2^%d\n", 
             starting_lba, number_of_lba, 
             sc->namespace_data.lbaf[0].lbads);
+    DPRINTF("nsid: %x\n", command->nsid);
+    DPRINTF("destination addr : 0x%lx\n", command->prp1);
 
-    assert(0);
+    struct nvme_ioreq *nreq = &sq_info->ioreq;
+
+    nreq->completion_entry.sqhd = sqhd;
+    nreq->completion_entry.sqid = sq_info->qid;
+    nreq->completion_entry.cid = command->cid;
+    nreq->cq_info = &sc->cqs_info[sq_info->completion_qid];
+    nreq->sc = sc;
+
+    struct blockif_req *breq = &nreq->io_req;
+    breq->br_iovcnt = 1;
+    breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lba * length);
+    breq->br_iov[0].iov_len = number_of_lba * length;
+    breq->br_offset = starting_lba;
+    breq->br_resid = number_of_lba * length;
+    breq->br_callback = pci_nvme_blockif_ioreq_cb;
+    breq->br_param = nreq;
+
+    err = blockif_read(sc->bctx, breq);
+	assert(err == 0 && "blockif_read failed");
 }
 
 static void
@@ -631,29 +725,33 @@ pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc,
     DPRINTF("value: %lx, qid: 0x%x, base_addr: 0x%lx\n",
             value, qid, sq_info->base_addr);
 
-    struct nvme_command *command = 
+    struct nvme_command* command = 
         (struct nvme_command*)(sq_info->base_addr + 
         sizeof(struct nvme_command) * (value - 1));
 
-    uint16_t completion_qid = sq_info->completion_qid;
-    struct nvme_completion_queue_info *cq_info = &sc->cqs_info[completion_qid];
-    struct nvme_completion *completion_entry = 
-        (struct nvme_completion*)(cq_info->base_addr +
-                sizeof(struct nvme_completion) * cq_info->head);
+/*     uint16_t completion_qid = sq_info->completion_qid; */
+/*     struct nvme_completion_queue_info *cq_info = &sc->cqs_info[completion_qid]; */
 
-    DPRINTF("[nvm command] opc: 0x%x, qid: 0x%x, value 0x%lx\n",
-        command->opc, qid, value);
+    DPRINTF("[nvm command] %s\n", get_nvm_command_text(command->opc));
+    DPRINTF("opc: 0x%x, qid: 0x%x, value 0x%lx\n", command->opc, qid, value);
 
     switch (command->opc)
     {
         case NVME_OPC_READ:
-            nvme_nvm_command_read(sc, command, completion_entry);
+            nvme_nvm_command_read(sc, command, sq_info, value - 1);
             return;
-        case NVME_OPC_DATASET_MANAGEMENT:
-            completion_entry->status.sc = 0x00;
-            completion_entry->status.sct = 0x0;
-            pci_generate_msix(sc->pi, sq_info->completion_qid);
-            return;
+/*         case NVME_OPC_DATASET_MANAGEMENT: */
+/*             { */
+/*                 pthread_mutex_lock(&cq_info->mtx); */
+/*                 struct nvme_completion* completion_entry =  */
+/*                     pci_nvme_acquire_completion_entry(sc, cq_info); */
+/*                 completion_entry->status.sc = 0x00; */
+/*                 completion_entry->status.sct = 0x0; */
+/*                 pthread_mutex_unlock(&cq_info->mtx); */
+
+/*                 pci_generate_msix(sc->pi, sq_info->completion_qid); */
+/*                 return; */
+/*             } */
 
         default:
             assert(0 && "the nvme command is not implemented yet");
