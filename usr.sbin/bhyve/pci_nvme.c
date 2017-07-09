@@ -255,7 +255,6 @@ struct pci_nvme_softc {
 	struct blockif_ctxt *bctx;
 };
 
-
 static void
 pci_nvme_reset(struct pci_nvme_softc *sc)
 {
@@ -666,11 +665,14 @@ pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
     nreq->completion_entry.status.sct = 0x0;
     nreq->completion_entry.status.sc = 0x00;
 
+    // save phase value before write values to completion queue entry
+    uint8_t status_phase = completion_entry->status.p;
+
     memcpy(completion_entry, &nreq->completion_entry, sizeof(struct nvme_completion));
-    completion_entry->status.p = !completion_entry->status.p;
+    completion_entry->status.p = !status_phase;
 
     cq_info->head++;
-    if(cq_info->head == cq_info->size)
+    if(cq_info->head > cq_info->size)
     {
         cq_info->head = 0;
     }
@@ -693,8 +695,7 @@ nvme_nvm_command_read(
     DPRINTF("slba %lx, nlba %x, size 2^%d\n", 
             starting_lba, number_of_lba, 
             sc->namespace_data.lbaf[0].lbads);
-    DPRINTF("nsid: %x\n", command->nsid);
-    DPRINTF("destination addr : 0x%lx\n", command->prp1);
+    DPRINTF("sqhd: 0x%x, destination addr : 0x%lx\n", sqhd, command->prp1);
 
     struct nvme_ioreq *nreq = &sq_info->ioreq;
 
@@ -718,29 +719,70 @@ nvme_nvm_command_read(
 }
 
 static void
+nvme_nvm_command_flush(
+        struct pci_nvme_softc *sc,
+        struct nvme_submission_queue_info* sq_info,
+        uint16_t cid,
+        uint16_t sqhd)
+{
+    struct nvme_completion_queue_info *cq_info = &sc->cqs_info[sq_info->completion_qid];
+
+    pthread_mutex_lock(&cq_info->mtx);
+    struct nvme_completion *completion_entry = 
+        (struct nvme_completion *)
+        (cq_info->base_addr + sizeof(struct nvme_completion) * cq_info->head);
+
+    completion_entry->sqhd = sqhd;
+    completion_entry->sqid = sq_info->qid;
+    completion_entry->cid = cid;
+    completion_entry->status.sct = 0x0;
+    completion_entry->status.sc = 0x00;
+    completion_entry->status.p = !completion_entry->status.p;
+
+    DPRINTF("cid: 0x%x, cqid: 0x%x, cq_info->head 0x%x, cq_info->size 0x%x\n", 
+            cid, sq_info->completion_qid, cq_info->head, cq_info->size);
+    cq_info->head++;
+    if(cq_info->head == cq_info->size)
+    {
+        cq_info->head = 0;
+    }
+    pthread_mutex_unlock(&cq_info->mtx);
+    
+    pci_generate_msix(sc->pi, sq_info->completion_qid);
+}
+
+static void
 pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc, 
-        uint16_t qid, uint64_t value)
+        uint16_t qid, uint64_t sq_tail)
 {
     struct nvme_submission_queue_info *sq_info = &sc->sqs_info[qid];
 
-    DPRINTF("value: %lx, qid: 0x%x, base_addr: 0x%lx\n",
-            value, qid, sq_info->base_addr);
+    uint16_t command_index = sq_tail - 1;
+    uint16_t sqhd = sq_tail - 1;
+    if(sq_tail == 0x0)
+    {
+        command_index = sq_info->size; 
+        sqhd = sq_info->size;
+    }
 
     struct nvme_command* command = 
         (struct nvme_command*)(sq_info->base_addr + 
-        sizeof(struct nvme_command) * (value - 1));
+        sizeof(struct nvme_command) * (command_index));
 
 /*     uint16_t completion_qid = sq_info->completion_qid; */
 /*     struct nvme_completion_queue_info *cq_info = &sc->cqs_info[completion_qid]; */
 
-    DPRINTF("[nvm command] %s\n", get_nvm_command_text(command->opc));
-    DPRINTF("opc: 0x%x, qid: 0x%x, value 0x%lx\n", command->opc, qid, value);
+    DPRINTF("***** nvm command %s *****\n", get_nvm_command_text(command->opc));
+    DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, value 0x%lx\n", command->opc, command->cid, command->nsid, qid, sq_tail);
 
     switch (command->opc)
     {
         case NVME_OPC_READ:
-            nvme_nvm_command_read(sc, command, sq_info, value - 1);
+            nvme_nvm_command_read(sc, command, sq_info, sqhd);
             return;
+/*         case NVME_OPC_FLUSH: */
+/*             nvme_nvm_command_flush(sc, sq_info, command->cid, sqhd); */
+/*             return; */
 /*         case NVME_OPC_DATASET_MANAGEMENT: */
 /*             { */
 /*                 pthread_mutex_lock(&cq_info->mtx); */
