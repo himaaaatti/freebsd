@@ -142,6 +142,20 @@ enum nvme_cmd_identify_data {
     NVME_CMD_IDENTIFY_CNS_CONTROLLER    = 0x1,
 };
 
+const char* get_identify_command_type(enum nvme_cmd_identify_data cns)
+{
+    switch(cns)
+    {
+        case NVME_CMD_IDENTIFY_CNS_NAMESPACE:
+            return "namespace";
+        case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
+            return "controller";
+        default:
+            assert(0 && "unknown cns values");
+    }
+}
+
+
 enum nvme_cc_bits {
     NVME_CC_EN      = 0x00000001,
     NVME_CC_RSV0    = 0x0000000e,
@@ -284,12 +298,21 @@ initialize_identify(struct pci_nvme_softc *sc)
 
     // LBA format
     sc->namespace_data.lbaf[0].ms = 0x00;
-    sc->namespace_data.lbaf[0].lbads =  10; //LBA data size is 2^n
+    /*
+     * LBA data size is 2^n (n is started by 0)
+     * should be larger than 9.(i.e. 512 bytes)
+     */
+    uint64_t lba_data_size = 10;
+    sc->namespace_data.lbaf[0].lbads = lba_data_size; 
     sc->namespace_data.lbaf[0].rp = 0x0;
 
     sc->namespace_data.nlbaf = 0x00;
     sc->namespace_data.flbas.format = 0x00;
     sc->namespace_data.nlbaf = 0x1;
+
+    uint64_t block_size = blockif_size(sc->bctx);
+    sc->namespace_data.nsze = block_size / (2 << (lba_data_size - 1));
+    sc->namespace_data.ncap = block_size / (2 << (lba_data_size - 1));
 }
 
 static int 
@@ -465,7 +488,7 @@ static void
 nvme_execute_identify_command(struct pci_nvme_softc *sc, 
         struct nvme_command *command, struct nvme_completion *cmp_entry)
 {
-    DPRINTF("Identify command\n");
+    DPRINTF("Identify command (%s)\n", get_identify_command_type(command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS));
     DPRINTF("cdw10 0x%x, dptr 0x%lx, 0x%lx", command->cdw10, command->prp1, command->prp2);
     uintptr_t dest_addr = (uintptr_t)vm_map_gpa(sc->pi->pi_vmctx,
             command->prp1, sizeof(struct nvme_controller_data));
@@ -704,6 +727,7 @@ nvme_nvm_command_read(
 }
 
 static void
+static void
 nvme_nvm_command_flush(
         struct pci_nvme_softc *sc,
         struct nvme_submission_queue_info* sq_info,
@@ -832,7 +856,7 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc *sc, uint64_t rego
     }
 
     DPRINTF("write %s, value %lx \n", get_nvme_cr_text(regoff), value);
-    assert(size != 4 && "word size should be 4(byte)");
+    assert(size == 4 && "word size should be 4(byte)");
     switch(regoff) 
     {
         case NVME_CR_CC:
@@ -924,7 +948,7 @@ static uint64_t
 pci_nvme_read_bar_0(struct pci_nvme_softc *sc, enum nvme_controller_register_offsets offset, int size)
 {
     DPRINTF("read %s\n", get_nvme_cr_text(offset));
-    assert(size != 4 && "word size should be 4.");
+    assert(size == 4 && "word size should be 4.");
     switch (offset) {
         case NVME_CR_CAP_LOW:
             return (uint64_t)sc->regs.cap_lo.raw;
