@@ -718,7 +718,8 @@ nvme_nvm_command_read(
     struct blockif_req *breq = &nreq->io_req;
     breq->br_iovcnt = 1;
 /*     breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lb * logic_block_size); */
-    breq->br_iov[0].iov_base = paddr_guest2host(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lb * logic_block_size);
+    breq->br_iov[0].iov_base = paddr_guest2host(sc->pi->pi_vmctx, command->prp1, 
+            (uint8_t)number_of_lb * logic_block_size);
     breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
     breq->br_offset = starting_lba * logic_block_size;
     breq->br_resid = number_of_lb * logic_block_size;
@@ -728,18 +729,7 @@ nvme_nvm_command_read(
     err = blockif_read(sc->bctx, breq);
     assert(err == 0 && "blockif_read failed");
 }
-    breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lba * length);
-    breq->br_iov[0].iov_len = number_of_lba * length;
-    breq->br_offset = starting_lba * length;
-    breq->br_resid = number_of_lba * length;
-    breq->br_callback = pci_nvme_blockif_ioreq_cb;
-    breq->br_param = nreq;
 
-    err = blockif_read(sc->bctx, breq);
-    assert(err == 0 && "blockif_read failed");
-}
-
-static void
 static void
 nvme_nvm_command_flush(
         struct pci_nvme_softc *sc,
@@ -802,6 +792,9 @@ pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc,
         case NVME_OPC_READ:
             nvme_nvm_command_read(sc, command, sq_info, sqhd);
             return;
+/*         case NVME_OPC_WRITE: */
+/*             nvme_nvm_command_write(sc, command, sq_info, sqhd); */
+/*             return; */
 /*         case NVME_OPC_FLUSH: */
 /*             nvme_nvm_command_flush(sc, sq_info, command->cid, sqhd); */
 /*             return; */
