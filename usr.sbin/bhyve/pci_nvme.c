@@ -12,6 +12,7 @@
 
 #include "pci_emul.h"
 #include "block_if.h"
+#include "bhyverun.h"
 
 #define NVME_DEBUG
 
@@ -697,11 +698,12 @@ nvme_nvm_command_read(
 {
     int err = 0;
     uintptr_t starting_lba = ((uint64_t)command->cdw11 << 32) | command->cdw10;
-    uint16_t number_of_lba = command->cdw12 & 0xffff;
-    ssize_t length = 2 << sc->namespace_data.lbaf[0].lbads;
+    // NLB (number of logic block) is a 0's based value
+    uint16_t number_of_lb = (command->cdw12 & 0xffff) + 1;
+    ssize_t logic_block_size = 1 << sc->namespace_data.lbaf[0].lbads;
 
     DPRINTF("slba %lx, nlba %x, size 2^%d\n", 
-            starting_lba, number_of_lba, 
+            starting_lba, number_of_lb, 
             sc->namespace_data.lbaf[0].lbads);
     DPRINTF("sqhd: 0x%x, destination addr : 0x%lx\n", sqhd, command->prp1);
 
@@ -715,6 +717,17 @@ nvme_nvm_command_read(
 
     struct blockif_req *breq = &nreq->io_req;
     breq->br_iovcnt = 1;
+/*     breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lb * logic_block_size); */
+    breq->br_iov[0].iov_base = paddr_guest2host(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lb * logic_block_size);
+    breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
+    breq->br_offset = starting_lba * logic_block_size;
+    breq->br_resid = number_of_lb * logic_block_size;
+    breq->br_callback = pci_nvme_blockif_ioreq_cb;
+    breq->br_param = nreq;
+
+    err = blockif_read(sc->bctx, breq);
+    assert(err == 0 && "blockif_read failed");
+}
     breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lba * length);
     breq->br_iov[0].iov_len = number_of_lba * length;
     breq->br_offset = starting_lba * length;
