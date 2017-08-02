@@ -303,7 +303,7 @@ initialize_identify(struct pci_nvme_softc *sc)
      * LBA data size is 2^n (n is started by 0)
      * should be larger than 9.(i.e. 512 bytes)
      */
-    uint64_t lba_data_size = 10;
+    uint64_t lba_data_size = 9;
     sc->namespace_data.lbaf[0].lbads = lba_data_size; 
     sc->namespace_data.lbaf[0].rp = 0x0;
 
