@@ -690,7 +690,7 @@ pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
 }
 
 static void
-nvme_nvm_command_read(
+nvme_nvm_command_read_write(
         struct pci_nvme_softc *sc, 
         struct nvme_command *command, 
         struct nvme_submission_queue_info* sq_info,
@@ -726,7 +726,18 @@ nvme_nvm_command_read(
     breq->br_callback = pci_nvme_blockif_ioreq_cb;
     breq->br_param = nreq;
 
-    err = blockif_read(sc->bctx, breq);
+    switch (command->opc)
+    {
+        case NVME_OPC_READ:
+            err = blockif_read(sc->bctx, breq);
+            break;
+        case NVME_OPC_WRITE:
+            err = blockif_write(sc->bctx, breq);
+            break;
+        default:
+            assert("??");
+    }
+
     assert(err == 0 && "blockif_read failed");
 }
 
@@ -785,16 +796,15 @@ pci_nvme_execute_nvme_command(struct pci_nvme_softc * sc,
 /*     struct nvme_completion_queue_info *cq_info = &sc->cqs_info[completion_qid]; */
 
     DPRINTF("***** nvm command %s *****\n", get_nvm_command_text(command->opc));
-    DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, value 0x%lx\n", command->opc, command->cid, command->nsid, qid, sq_tail);
+    DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, value 0x%lx\n", 
+            command->opc, command->cid, command->nsid, qid, sq_tail);
 
     switch (command->opc)
     {
         case NVME_OPC_READ:
-            nvme_nvm_command_read(sc, command, sq_info, sqhd);
+        case NVME_OPC_WRITE:
+            nvme_nvm_command_read_write(sc, command, sq_info, sqhd);
             return;
-/*         case NVME_OPC_WRITE: */
-/*             nvme_nvm_command_write(sc, command, sq_info, sqhd); */
-/*             return; */
 /*         case NVME_OPC_FLUSH: */
 /*             nvme_nvm_command_flush(sc, sq_info, command->cid, sqhd); */
 /*             return; */
