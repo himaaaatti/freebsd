@@ -221,7 +221,10 @@ struct nvme_ioreq {
     struct blockif_req io_req;
     struct nvme_completion completion_entry;
     struct nvme_completion_queue_info* cq_info;
+    struct nvme_submission_queue_info* sq_info;
     struct pci_nvme_softc *sc;
+    STAILQ_ENTRY(nvme_ioreq) io_flist;
+    TAILQ_ENTRY(nvme_ioreq) io_blist;
 };
 
 struct nvme_submission_queue_info {
@@ -229,7 +232,9 @@ struct nvme_submission_queue_info {
     uint16_t size;
     uint16_t qid;
     uint16_t completion_qid;
-    struct nvme_ioreq ioreq;
+    struct nvme_ioreq *ioreq;
+    STAILQ_HEAD(nvme_fhead, nvme_ioreq) iofhd;
+	TAILQ_HEAD(nvme_bhead, nvme_ioreq) iobhd;
 };
 
 /* struct nvme_namespace { */
@@ -317,6 +322,29 @@ initialize_identify(struct pci_nvme_softc *sc)
 }
 
 static int 
+pci_nvme_submission_queue_init(
+        struct nvme_submission_queue_info* qinfo,
+        struct blockif_ctxt* ctxt)
+{
+    struct nvme_ioreq *req;
+    int ioq_size = blockif_queuesz(ctxt);
+    qinfo->ioreq = calloc(ioq_size, sizeof(struct nvme_ioreq));
+    STAILQ_INIT(&qinfo->iofhd);
+
+    // setup and insert requests to the free queue
+    for(int i=0;i<ioq_size; ++i)
+    {
+        req = &qinfo->ioreq[i] ;
+        req->sq_info = qinfo;
+        // setup callback function
+        STAILQ_INSERT_TAIL(&qinfo->iofhd, req, io_flist);
+    }
+
+    TAILQ_INIT(&qinfo->iobhd);
+    return 0;
+}
+
+static int 
 pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
     struct pci_nvme_softc *sc;
@@ -372,6 +400,11 @@ pci_nvme_init (struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
     int number_of_submission_queues = 4;
     sc->sqs_info = calloc(number_of_submission_queues, sizeof(struct nvme_submission_queue_info));
+
+    for(int i=0; i<number_of_submission_queues; ++i)
+    {
+        pci_nvme_submission_queue_init(&sc->sqs_info[i], sc->bctx);
+    }
 
     initialize_identify(sc);
     initialize_feature(sc);
@@ -666,6 +699,7 @@ pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
 
     struct nvme_ioreq *nreq = br->br_param;
     struct nvme_completion_queue_info* cq_info = nreq->cq_info;
+    struct nvme_submission_queue_info* sq_info = nreq->sq_info;
 
     pthread_mutex_lock(&cq_info->mtx);
     struct nvme_completion *completion_entry = 
@@ -685,6 +719,11 @@ pci_nvme_blockif_ioreq_cb(struct blockif_req *br, int err)
     {
         cq_info->head = 0;
     }
+
+    TAILQ_REMOVE(&sq_info->iobhd, nreq, io_blist);
+
+    STAILQ_INSERT_TAIL(&sq_info->iofhd, nreq, io_flist);
+
     pthread_mutex_unlock(&cq_info->mtx);
     pci_generate_msix(nreq->sc->pi, cq_info->qid);
 }
@@ -707,7 +746,10 @@ nvme_nvm_command_read_write(
             sc->namespace_data.lbaf[0].lbads);
     DPRINTF("sqhd: 0x%x, destination addr : 0x%lx\n", sqhd, command->prp1);
 
-    struct nvme_ioreq *nreq = &sq_info->ioreq;
+/*     struct nvme_ioreq *nreq = sq_info->ioreq; */
+    struct nvme_ioreq *nreq = STAILQ_FIRST(&sq_info->iofhd);
+    assert(nreq != NULL);
+    STAILQ_REMOVE_HEAD(&sq_info->iofhd, io_flist);
 
     nreq->completion_entry.sqhd = sqhd;
     nreq->completion_entry.sqid = sq_info->qid;
@@ -717,14 +759,16 @@ nvme_nvm_command_read_write(
 
     struct blockif_req *breq = &nreq->io_req;
     breq->br_iovcnt = 1;
-/*     breq->br_iov[0].iov_base = vm_map_gpa(sc->pi->pi_vmctx, command->prp1, (uint8_t)number_of_lb * logic_block_size); */
-    breq->br_iov[0].iov_base = paddr_guest2host(sc->pi->pi_vmctx, command->prp1, 
-            (uint8_t)number_of_lb * logic_block_size);
+    breq->br_iov[0].iov_base = 
+        paddr_guest2host(sc->pi->pi_vmctx, command->prp1, 
+        (uint8_t)number_of_lb * logic_block_size);
     breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
     breq->br_offset = starting_lba * logic_block_size;
     breq->br_resid = number_of_lb * logic_block_size;
     breq->br_callback = pci_nvme_blockif_ioreq_cb;
     breq->br_param = nreq;
+
+    TAILQ_INSERT_HEAD(&sq_info->iobhd, nreq, io_blist);
 
     switch (command->opc)
     {
@@ -738,7 +782,7 @@ nvme_nvm_command_read_write(
             assert("??");
     }
 
-    assert(err == 0 && "blockif_read failed");
+    assert(err == 0 && "blockif_read or blockif_write failed");
 }
 
 static void
@@ -748,6 +792,7 @@ nvme_nvm_command_flush(
         uint16_t cid,
         uint16_t sqhd)
 {
+    assert("not yet implemented");
     struct nvme_completion_queue_info *cq_info = &sc->cqs_info[sq_info->completion_qid];
 
     pthread_mutex_lock(&cq_info->mtx);
