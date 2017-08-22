@@ -654,6 +654,15 @@ static void nvme_execute_create_io_sq_command(struct pci_nvme_softc* sc,
         assert(0 && "not implemented");
     }
 }
+static void nvme_execute_delete_io_sq_command(
+    struct pci_nvme_softc* sc,
+    struct nvme_command* command,
+    struct nvme_completion* cmp_entry)
+{
+    uint16_t qid = command->cdw10 & 0xffff;
+    sc->cqs_info[qid].base_addr = (uintptr_t)NULL;
+    pci_generate_msix(sc->pi, 0);
+}
 
 static void execute_async_event_request_command(
     struct pci_nvme_softc* sc,
@@ -683,6 +692,9 @@ static void pci_nvme_execute_admin_command(struct pci_nvme_softc* sc,
 
     DPRINTF("[admin command] %s\n", get_admin_command_text(command->opc));
     switch (command->opc) {
+        case NVME_OPC_DELETE_IO_SQ:
+            nvme_execute_delete_io_sq_command(sc, command, cmp_entry);
+            break;
         case NVME_OPC_CREATE_IO_SQ:
             nvme_execute_create_io_sq_command(sc, command, cmp_entry);
             break;
