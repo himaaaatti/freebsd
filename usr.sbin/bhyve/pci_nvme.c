@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 #include <pthread.h>
@@ -45,13 +46,16 @@ enum nvme_controller_register_offsets {
     NVME_CR_IO_QUEUE_BASE = 0x1000,
 };
 
-const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset)
+const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset,
+                             bool is_read)
 {
     switch (offset) {
         case NVME_CR_CAP_LOW:
             return "CAP_LOW";
         case NVME_CR_CAP_HI:
             return "CAP_HI";
+        case NVME_CR_VS:
+            return "VS";
         case NVME_CR_CC:
             return "CC";
         case NVME_CR_CSTS:
@@ -68,7 +72,13 @@ const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset)
             return "ACQ_HI";
 
         default:
-            DPRINTF("read 0x%x\n", offset);
+            if (is_read) {
+                DPRINTF("read ");
+            }
+            else {
+                DPRINTF("write ");
+            }
+            DPRINTF("0x%x\n", offset);
             assert(0);
     }
 }
@@ -211,6 +221,7 @@ struct nvme_completion_queue_info {
     uint16_t size;
     uint16_t head;
     uint16_t qid;
+    uint16_t interrupt_vector;
     pthread_mutex_t mtx;
 };
 
@@ -261,6 +272,9 @@ struct pci_nvme_softc {
 
 static void pci_nvme_reset(struct pci_nvme_softc* sc)
 {
+    /*
+     * Controller Register values are according to NVMe specification 1.0e.
+     */
     sc->regs.cap_lo.bits.mqes = 0x10;
     sc->regs.cap_lo.bits.cqr = 1;
     sc->regs.cap_lo.bits.ams = 0;
@@ -275,6 +289,9 @@ static void pci_nvme_reset(struct pci_nvme_softc* sc)
     sc->regs.cap_hi.bits.mpsmin = 0;
     sc->regs.cap_hi.bits.mpsmax = 0;
     sc->regs.cap_hi.bits.reserved1 = 0;
+
+    uint32_t version = (0x0001 << 16) | 0x0000;
+    sc->regs.vs = version;
 
     sc->regs.cc.raw = 0;
 
@@ -296,7 +313,7 @@ static void initialize_feature(struct pci_nvme_softc* sc)
 
 static void initialize_identify(struct pci_nvme_softc* sc)
 {
-    sc->controller_data.nn = 0x2;  // TODO consider this value
+    sc->controller_data.nn = 0x1;  // TODO consider this value
 
     // LBA format
     sc->namespace_data.lbaf[0].ms = 0x00;
@@ -360,8 +377,11 @@ static int pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
         goto fail;
     }
 
-    pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
+    pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0953);
+/*     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111); */
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
+    pci_set_cfgdata8(pi, PCIR_CLASS, PCIC_STORAGE);
+
     // for NVMe Controller Registers
     if (pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f)) {
         DPRINTF("error is occured in pci_emul_alloc_bar\n");
@@ -452,6 +472,7 @@ static void execute_set_feature_command(struct pci_nvme_softc* sc,
             break;
 
         case NVME_FEAT_ASYNC_EVENT_CONFIGURATION:
+            //TODO 
             sc->features.async_event_config.raw = command->cdw11;
             cmp_entry->status.sc = 0x00;
             cmp_entry->status.sct = 0x0;
@@ -576,10 +597,14 @@ static void nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
                                   sizeof(struct nvme_completion) * queue_size);
         sc->cqs_info[qid].size = queue_size;
         sc->cqs_info[qid].qid = qid;
+        sc->cqs_info[qid].interrupt_vector = command->cdw11 >> 16;
 
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
         pci_generate_msix(sc->pi, 0);
+        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
+                qid, queue_size, command->prp1, 
+                command->cdw11 >> 16);
     }
     else {
         assert(0 && "not implemented");
@@ -601,7 +626,6 @@ static void nvme_execute_create_io_sq_command(struct pci_nvme_softc* sc,
 {
     if (command->cdw11 & NVME_CREATE_IO_SQ_CDW11_PC) {
         uint16_t qid = command->cdw10 & 0xffff;
-        DPRINTF("qid: %x, base_addr %lx\n", qid, command->prp1);
 
         // TODO
         /*         uint8_t queue_priority = (command->cdw11 &
@@ -619,12 +643,12 @@ static void nvme_execute_create_io_sq_command(struct pci_nvme_softc* sc,
         sq_info->completion_qid = cqid;
         sq_info->qid = qid;
 
-        DPRINTF("sc->sqs_info[%d].base_addr: %lx\n", qid,
-                sc->sqs_info[qid].base_addr);
-
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
         pci_generate_msix(sc->pi, 0);
+        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
+                qid, queue_size, command->prp1, command->cdw11 >> 16);
+
     }
     else {
         assert(0 && "not implemented");
@@ -721,7 +745,9 @@ static void pci_nvme_blockif_ioreq_cb(struct blockif_req* br, int err)
     STAILQ_INSERT_TAIL(&sq_info->iofhd, nreq, io_flist);
 
     pthread_mutex_unlock(&cq_info->mtx);
-    pci_generate_msix(nreq->sc->pi, cq_info->qid);
+    DPRINTF("qid %d, status phase %x IV %d\n", 
+            cq_info->qid, !status_phase, cq_info->interrupt_vector);
+    pci_generate_msix(nreq->sc->pi, cq_info->interrupt_vector);
 }
 
 static void nvme_nvm_command_read_write(
@@ -750,6 +776,7 @@ static void nvme_nvm_command_read_write(
     nreq->completion_entry.cid = command->cid;
     nreq->cq_info = &sc->cqs_info[sq_info->completion_qid];
     nreq->sc = sc;
+    DPRINTF("sqid %d, cqid %d\n", sq_info->qid, sq_info->completion_qid);
 
     struct blockif_req* breq = &nreq->io_req;
     breq->br_iovcnt = 1;
@@ -907,7 +934,7 @@ static void pci_nvme_write_bar_0(struct vmctx* ctx,
         assert(0);
     }
 
-    DPRINTF("write %s, value %lx \n", get_nvme_cr_text(regoff), value);
+    DPRINTF("write %s, value %lx \n", get_nvme_cr_text(regoff, false), value);
     assert(size == 4 && "word size should be 4(byte)");
     switch (regoff) {
         case NVME_CR_CC:
@@ -1006,7 +1033,7 @@ static uint64_t pci_nvme_read_bar_0(
     enum nvme_controller_register_offsets offset,
     int size)
 {
-    DPRINTF("read %s\n", get_nvme_cr_text(offset));
+    DPRINTF("read %s\n", get_nvme_cr_text(offset, true));
     assert(size == 4 && "word size should be 4.");
     switch (offset) {
         case NVME_CR_CAP_LOW:
@@ -1015,10 +1042,14 @@ static uint64_t pci_nvme_read_bar_0(
         case NVME_CR_CAP_HI:
             return (uint64_t)sc->regs.cap_hi.raw;
 
+        case NVME_CR_VS:
+            return (uint64_t)sc->regs.vs;
+
         case NVME_CR_CC:
             return (uint64_t)sc->regs.cc.raw;
 
         case NVME_CR_CSTS:
+            DPRINTF("CSTS raw 0x%x\n", sc->regs.csts.raw);
             return (uint64_t)sc->regs.csts.raw;
 
         default:
@@ -1039,8 +1070,7 @@ static uint64_t pci_nvme_read(struct vmctx* ctx,
 {
     struct pci_nvme_softc* sc = pi->pi_arg;
 
-    if (baridx == pci_msix_table_bar(pi) 
-            || baridx == pci_msix_pba_bar(pi)) {
+    if (baridx == pci_msix_table_bar(pi) || baridx == pci_msix_pba_bar(pi)) {
         DPRINTF("baridx: %d, msix: regoff 0x%lx, size %d\n", baridx, regoff,
                 size);
         return pci_emul_msix_tread(pi, regoff, size);
@@ -1058,10 +1088,8 @@ static uint64_t pci_nvme_read(struct vmctx* ctx,
     return 0;
 }
 
-struct pci_devemu pci_de_nvme = {
-    .pe_emu = "nvme",
-    .pe_init = pci_nvme_init,
-    .pe_barwrite = pci_nvme_write,
-    .pe_barread = pci_nvme_read
-};
+struct pci_devemu pci_de_nvme = {.pe_emu = "nvme",
+                                 .pe_init = pci_nvme_init,
+                                 .pe_barwrite = pci_nvme_write,
+                                 .pe_barread = pci_nvme_read};
 PCI_EMUL_SET(pci_de_nvme);
