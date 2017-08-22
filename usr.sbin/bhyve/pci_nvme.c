@@ -660,6 +660,16 @@ static void nvme_execute_delete_io_sq_command(
     struct nvme_completion* cmp_entry)
 {
     uint16_t qid = command->cdw10 & 0xffff;
+    sc->sqs_info[qid].base_addr = (uintptr_t)NULL;
+    pci_generate_msix(sc->pi, 0);
+}
+
+static void nvme_execute_delete_io_cq_command(
+    struct pci_nvme_softc* sc,
+    struct nvme_command* command,
+    struct nvme_completion* cmp_entry)
+{
+    uint16_t qid = command->cdw10 & 0xffff;
     sc->cqs_info[qid].base_addr = (uintptr_t)NULL;
     pci_generate_msix(sc->pi, 0);
 }
@@ -697,6 +707,9 @@ static void pci_nvme_execute_admin_command(struct pci_nvme_softc* sc,
             break;
         case NVME_OPC_CREATE_IO_SQ:
             nvme_execute_create_io_sq_command(sc, command, cmp_entry);
+            break;
+        case NVME_OPC_DELETE_IO_CQ:
+            nvme_execute_delete_io_cq_command(sc, command, cmp_entry);
             break;
         case NVME_OPC_CREATE_IO_CQ:
             nvme_execute_create_io_cq_command(sc, command, cmp_entry);
@@ -756,10 +769,10 @@ static void pci_nvme_blockif_ioreq_cb(struct blockif_req* br, int err)
 
     STAILQ_INSERT_TAIL(&sq_info->iofhd, nreq, io_flist);
 
-    pthread_mutex_unlock(&cq_info->mtx);
-    DPRINTF("qid %d, status phase %x IV %d\n", 
+    DPRINTF("cq_head 0x%x, qid %d, status phase %x IV %d\n", cq_info->head,
             cq_info->qid, !status_phase, cq_info->interrupt_vector);
     pci_generate_msix(nreq->sc->pi, cq_info->interrupt_vector);
+    pthread_mutex_unlock(&cq_info->mtx);
 }
 
 static void nvme_nvm_command_read_write(
@@ -872,7 +885,7 @@ static void pci_nvme_execute_nvme_command(struct pci_nvme_softc* sc,
      * &sc->cqs_info[completion_qid]; */
 
     DPRINTF("***** nvm command %s *****\n", get_nvm_command_text(command->opc));
-    DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, value 0x%lx\n",
+    DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, sq_tail 0x%lx\n",
             command->opc, command->cid, command->nsid, qid, sq_tail);
 
     switch (command->opc) {
@@ -920,7 +933,8 @@ static void pci_nvme_write_bar_0(struct vmctx* ctx,
         int is_completion = (queue_offset / 4) % 2;
         // completion doorbell
         if (is_completion) {
-            DPRINTF("completion doorbell (%d) is knocked\n", qid);
+            DPRINTF("completion doorbell (%d) is knocked, cqhd 0x%x\n", 
+                    qid, (uint16_t)value);
             if (qid == 0) {
                 // TODO
             }
@@ -977,6 +991,19 @@ static void pci_nvme_write_bar_0(struct vmctx* ctx,
                 sc->regs.csts.bits.rdy = 0;
                 // TODO
                 /*                     assert(0); */
+            }
+
+            switch((value & NVME_CC_SHN) >> 14)
+            {
+/*                 case NVME_SHN_NOEFCT: */
+                case 0:
+                    break;
+                case NVME_SHN_NORMAL:
+                    sc->regs.csts.bits.shst = NVME_SHST_COMPLETE;
+                    break;
+                case NVME_SHN_ABRUPT:
+                default:
+                    assert(0 && "not yet implemented");
             }
 
             sc->regs.cc.raw = (uint32_t)value;
@@ -1100,8 +1127,10 @@ static uint64_t pci_nvme_read(struct vmctx* ctx,
     return 0;
 }
 
-struct pci_devemu pci_de_nvme = {.pe_emu = "nvme",
-                                 .pe_init = pci_nvme_init,
-                                 .pe_barwrite = pci_nvme_write,
-                                 .pe_barread = pci_nvme_read};
+struct pci_devemu pci_de_nvme = {
+    .pe_emu = "nvme",
+    .pe_init = pci_nvme_init,
+    .pe_barwrite = pci_nvme_write,
+    .pe_barread = pci_nvme_read
+};
 PCI_EMUL_SET(pci_de_nvme);
