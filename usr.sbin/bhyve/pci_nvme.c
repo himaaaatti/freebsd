@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #include <dev/nvme/nvme.h>
 
@@ -20,6 +21,13 @@ static FILE* dbg;
 #endif
 
 #define ctx_from_sc(sc) ((sc)->pi->pi_vmctx)
+
+enum nvme_doorbell_registers {
+    NVME_DOORBELL_ADMIN_SUBMISSION = 0x1000,
+    NVME_DOORBELL_ADMIN_COMPLETION = 0x1004,
+    NVME_DOORBELL_NVM_SUBMISSION = 0x1008,
+    NVME_DOORBELL_NVM_COMPLETION = 0x100c,
+};
 
 enum nvme_controller_register_offsets {
     NVME_CR_CAP_LOW = 0x00,
@@ -118,6 +126,7 @@ struct nvme_completion_queue {
     uint16_t interrupt_vector;
     uint16_t size;
     uint16_t qid;
+    uint16_t tail;
 };
 
 struct nvme_submission_queue {
@@ -125,6 +134,9 @@ struct nvme_submission_queue {
     uint16_t size;
     uint16_t qid;
     uint16_t completion_qid;
+    uint16_t tail;
+    pthread_cond_t cond;
+    pthread_mutex_t mtx;
     //XX ioreq
 };
 
@@ -248,7 +260,7 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
      * - 0x100c ~ DOORBELL_LIMIT(0x100f)
      *  Completion queue tail doorbell register for nvm commands
      *
-     * */
+     */
 
     /*     status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f); */
     status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32, DOORBELL_LIMIT);
@@ -283,8 +295,8 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     sc->cqs = calloc(MAX_CQ_NUM, sizeof(struct nvme_completion_queue));
     sc->sqs = calloc(MAX_SQ_NUM, sizeof(struct nvme_submission_queue));
 
-    //TODO: Initialize Submission queue
-
+    //TODO: Initialize Submission queue and pthread mutex and condition vairable.
+    
     return 0;
 
 free_sc:
@@ -303,6 +315,89 @@ pci_nvme_setup_controller(struct pci_nvme_softc* sc)
                 sizeof(struct nvme_completion) * sc->regs.aqa.bits.acqs);
 }
 
+static void 
+pci_nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
+                                              struct nvme_command* command,
+                                              struct nvme_completion* cmp_entry)
+{
+    // TODO
+    //  IEN
+    DPRINTF("interrupt vector 0x%x\n", command->cdw11 >> 16);
+    if (command->cdw11 & NVME_CREATE_IO_CQ_CDW11_PC) {
+        uint16_t qid = command->cdw10 & 0xffff;
+
+        if (sc->cqs[qid].base_addr != (uintptr_t)NULL) {
+            assert(0 && "the completion queue is already used");
+        }
+
+        uint16_t interrupt_vector = command->cdw11 >> 16;
+        uint16_t queue_size = command->cdw10 >> 16;
+        sc->cqs[qid].base_addr =
+            (uintptr_t)paddr_guest2host(ctx_from_sc(sc), command->prp1,
+                                  sizeof(struct nvme_completion) * queue_size);
+        sc->cqs[qid].size = queue_size;
+        sc->cqs[qid].qid = qid;
+        sc->cqs[qid].interrupt_vector = interrupt_vector;
+
+        cmp_entry->status.sc = 0x00;
+        cmp_entry->status.sct = 0x0;
+        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
+                qid, queue_size, command->prp1, interrupt_vector);
+    }
+    else {
+        assert(0 && "not yet implemented");
+    }
+
+    return;
+}
+
+static void
+pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
+{
+    struct nvme_command* command =
+        (struct nvme_command*)(sc->regs.asq +
+                               sizeof(struct nvme_command) * *head);
+    struct nvme_completion_queue* admin_cq = &sc->cqs[0];
+    struct nvme_completion* completion_entry =
+        (struct nvme_completion*)(sc->regs.acq +
+                                  sizeof(struct nvme_completion) *
+                                      admin_cq->tail);
+
+
+    switch (command->opc) {
+        case NVME_OPC_CREATE_IO_SQ:
+            pci_nvme_execute_create_io_cq_command(sc, command,
+                                                  completion_entry);
+            break;
+    }
+
+    completion_entry->sqid = 0;
+    completion_entry->sqhd = *head;
+    completion_entry->cid = command->cid;
+    completion_entry->status.p != completion_entry->status.p;
+    *head++;
+    if(*head == sc->regs.aqa.bits.acqs) 
+    {
+        *head = 0;
+    }
+    pci_generate_msix(sc->pi, 0);
+}
+
+static void
+pci_nvme_admin_cmd_exec_thr(void* arg)
+{
+    struct pci_nvme_softc* sc = arg;
+    uint16_t sq_head = 0;
+    struct nvme_submission_queue* admin_sq = &sc->sqs[0];
+
+    while(true) {
+        if(sq_head == admin_sq->tail) {
+            pthread_cond_wait(&admin_sq->cond, &admin_sq->mtx);
+        }
+        pci_nvme_admin_cmd_execute(sc, &sq_head);
+    }
+}
+
 static void
 pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
         uint64_t offset, uint64_t value, int size)
@@ -313,8 +408,18 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
      *  0x1000 ~ DOORBELL_LIMIT(0x100f)
      */
     if (offset >= NVME_CR_IO_QUEUE_BASE && offset <= DOORBELL_LIMIT) {
-        //TODO
-        assert(0);
+        switch(offset) {
+            case NVME_DOORBELL_ADMIN_SUBMISSION:
+            case NVME_DOORBELL_ADMIN_COMPLETION:
+                DPRINTF("Doorbell is knocked for admin completion.\n");
+                DPRINTF("CQ head is 0x%lx\n", value);
+                break;
+            case NVME_DOORBELL_NVM_SUBMISSION:
+            case NVME_DOORBELL_NVM_COMPLETION:
+
+            default:
+                assert(0);
+        }
     }
 
     /*
@@ -357,6 +462,9 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
             sc->regs.cc.raw = (uint32_t)value;
             return;
 
+        /*
+         * Registers for admin submission queue and completion queue.
+         */
         case NVME_CR_AQA:
             sc->regs.aqa.raw = (uint32_t)value;
             return;
@@ -390,7 +498,6 @@ static void
 pci_nvme_write(struct vmctx* ctx, int vcpu, struct pci_devinst* pi, int baridx,
                            uint64_t offset, int size, uint64_t value)
 {
-
     struct pci_nvme_softc *sc = pi->pi_arg;
 
     if(baridx == pci_msix_table_bar(pi) || baridx == pci_msix_table_bar(pi)) {
