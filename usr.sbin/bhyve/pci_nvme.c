@@ -15,7 +15,7 @@
 #include "block_if.h"
 #include "bhyverun.h"
 
-#define NVME_DEBUG
+/* #define NVME_DEBUG */
 
 #ifdef NVME_DEBUG
 static FILE* dbg;
@@ -377,8 +377,8 @@ static int pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
         goto fail;
     }
 
-    pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0953);
-/*     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111); */
+/*     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0953); */
+    pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
     pci_set_cfgdata8(pi, PCIR_CLASS, PCIC_STORAGE);
 
@@ -734,6 +734,10 @@ static void pci_nvme_execute_admin_command(struct pci_nvme_softc* sc,
     }
 
     sc->completion_queue_head++;
+    if(sc->regs.aqa.bits.acqs == sc->completion_queue_head)
+    {
+        sc->completion_queue_head = 0;
+    }
 }
 
 static void pci_nvme_blockif_ioreq_cb(struct blockif_req* br, int err)
