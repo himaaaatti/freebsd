@@ -591,20 +591,20 @@ static void nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
             assert(0 && "the completion queue is already used");
         }
 
+        uint16_t interrupt_vector = command->cdw11 >> 16;
         uint16_t queue_size = command->cdw10 >> 16;
         sc->cqs_info[qid].base_addr =
             (uintptr_t)vm_map_gpa(sc->pi->pi_vmctx, command->prp1,
                                   sizeof(struct nvme_completion) * queue_size);
         sc->cqs_info[qid].size = queue_size;
         sc->cqs_info[qid].qid = qid;
-        sc->cqs_info[qid].interrupt_vector = command->cdw11 >> 16;
+        sc->cqs_info[qid].interrupt_vector = interrupt_vector;
 
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
         pci_generate_msix(sc->pi, 0);
         DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
-                qid, queue_size, command->prp1, 
-                command->cdw11 >> 16);
+                qid, queue_size, command->prp1, interrupt_vector);
     }
     else {
         assert(0 && "not implemented");
@@ -646,8 +646,8 @@ static void nvme_execute_create_io_sq_command(struct pci_nvme_softc* sc,
         cmp_entry->status.sc = 0x00;
         cmp_entry->status.sct = 0x0;
         pci_generate_msix(sc->pi, 0);
-        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
-                qid, queue_size, command->prp1, command->cdw11 >> 16);
+        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, cqid %d\n", 
+                qid, queue_size, command->prp1, cqid);
 
     }
     else {
