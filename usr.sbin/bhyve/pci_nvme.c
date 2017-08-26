@@ -185,6 +185,14 @@ struct nvme_features {
     union {
         uint32_t raw;
         struct {
+            uint16_t ncqr;
+            uint16_t nsqr;
+        } __packed bits;
+    } __packed num_of_queues;
+
+    union {
+        uint32_t raw;
+        struct {
             uint16_t over;
             uint16_t under;
         } __packed bits;
@@ -223,8 +231,6 @@ struct pci_nvme_softc {
     struct pci_devinst* pi;
     struct blockif_ctxt* bctx;
     struct nvme_registers regs;
-    uint16_t submission_queue_head;
-    uint16_t completion_queue_tail;
     struct nvme_completion_queue* cqs;
     struct nvme_submission_queue* sqs;
     struct nvme_controller_data controller_data;
@@ -264,9 +270,6 @@ pci_nvme_softc_reset(struct pci_nvme_softc* sc)
 
     sc->regs.asq = 0;
     sc->regs.acq = 0;
-
-    sc->submission_queue_head = 0;
-    sc->completion_queue_tail = 0;
 
     /*
      * Initialize identify data
@@ -314,7 +317,7 @@ pci_nvme_softc_reset(struct pci_nvme_softc* sc)
 
 
 static void
-pci_nvme_submission_queue_init(uint16_t size, int qid, int cqid,
+pci_nvme_sq_init(uint16_t size, int qid, int cqid,
         struct nvme_submission_queue* queue_info)
 {
     queue_info->base_addr = (uintptr_t)NULL;
@@ -325,6 +328,17 @@ pci_nvme_submission_queue_init(uint16_t size, int qid, int cqid,
     pthread_cond_init(&queue_info->cond, NULL);
     pthread_mutex_init(&queue_info->mtx, NULL);
     //initialize ioreq for blockif
+}
+
+static void
+pci_nvme_cq_init(uint16_t size, int qid, int interrupt_vector, 
+        struct nvme_completion_queue* cq_info)
+{
+    cq_info->base_addr = (uintptr_t)NULL;
+    cq_info->size = size;
+    cq_info->qid = qid;
+    cq_info->tail = 0;
+    cq_info->interrupt_vector = interrupt_vector;
 }
 
 static void 
@@ -372,21 +386,16 @@ pci_nvme_execute_set_feature_command(struct pci_nvme_softc* sc,
     enum nvme_feature feature = command->cdw10 & 0xf;
     DPRINTF("set feature [%s]\n", get_feature_text(feature));
     switch (feature) {
-/*         case NVME_FEAT_NUMBER_OF_QUEUES: */
-/*             sc->features.num_of_queues.raw = command->cdw11 & 0xffff; */
-/*             DPRINTF("SET_FEATURE cmd: ncqr 0x%x, nsqr 0x%x\n", */
-/*                     (command->cdw11 >> 16), (command->cdw11 & 0xffff)); */
-/*             cmp_entry->status.sc = 0x00; */
-/*             cmp_entry->status.sct = 0x0; */
-/*             if (pci_msix_enabled(sc->pi)) { */
-/*                 DPRINTF("generate msix, table_count %d, \n", */
-/*                         sc->pi->pi_msix.table_count); */
-/*                 pci_generate_msix(sc->pi, 0); */
-/*             } */
-/*             else { */
-/*                 assert(0 && "pci_msix is disable?"); */
-/*             } */
-/*             break; */
+        case NVME_FEAT_NUMBER_OF_QUEUES:
+            sc->features.num_of_queues.raw = command->cdw11;
+            DPRINTF("number of io queues: CQ 0x%x, SQ 0x%x\n",
+                    sc->features.num_of_queues.bits.ncqr, 
+                    sc->features.num_of_queues.bits.nsqr);
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+/*             cmp_entry->cdw0 = (0x0001 << 16) || 0x0001; */
+            cmp_entry->cdw0 = 0;
+            break;
 
 /*         case NVME_FEAT_ASYNC_EVENT_CONFIGURATION: */
 /*             //TODO  */
@@ -409,8 +418,6 @@ pci_nvme_execute_set_feature_command(struct pci_nvme_softc* sc,
         default:
             assert(0 && "this feature is not implemented");
     }
-
-
 }
 
 static void
@@ -454,14 +461,12 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
         pci_generate_msix(sc->pi, 0);
     }
 
-    *sq_head++;
+    (*sq_head)++;
     if(*sq_head == sc->regs.aqa.bits.asqs) 
     {
         *sq_head = 0;
     }
 }
-
-
 
 static void *
 pci_nvme_admin_cmd_exec_thr(void* arg)
@@ -472,11 +477,11 @@ pci_nvme_admin_cmd_exec_thr(void* arg)
 
     pthread_mutex_lock(&admin_sq->mtx);
     while(true) {
-        if(sq_head == admin_sq->tail) {
+        while(sq_head == admin_sq->tail) {
             pthread_cond_wait(&admin_sq->cond, &admin_sq->mtx);
         }
-        printf("receive signal in %s\n", __func__);
         pci_nvme_admin_cmd_execute(sc, &sq_head);
+        DPRINTF("cq tail is %x\n", sc->cqs[0].tail);
     }
     pthread_mutex_unlock(&admin_sq->mtx);
 }
@@ -556,10 +561,10 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     sc->sqs = calloc(MAX_SQ_NUM, sizeof(struct nvme_submission_queue));
 
     /* setup admin queues */
-    pci_nvme_submission_queue_init(sc->regs.aqa.bits.asqs, 0, 0, &sc->sqs[0]);
+    pci_nvme_sq_init(sc->regs.aqa.bits.asqs, 0, 0, &sc->sqs[0]);
+    pci_nvme_cq_init(sc->regs.aqa.bits.acqs, 0, 0, &sc->cqs[0]);
     pthread_create(sc->sq_work_thread, NULL,
             pci_nvme_admin_cmd_exec_thr, sc);
-    //TODO setup admin cq
    
     for (int i = 1; i < MAX_SQ_NUM; ++i) {
         // TODO: Initialize submittion i/o queue
@@ -603,9 +608,11 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
      * - offset
      *  0x1000 ~ DOORBELL_LIMIT(0x100f)
      */
+    DPRINTF("%s, value is %lx\n", __func__, value);
     if (offset >= NVME_CR_IO_QUEUE_BASE && offset <= DOORBELL_LIMIT) {
         switch(offset) {
             case NVME_DOORBELL_ADMIN_SUBMISSION:
+                admin_sq->tail = value;
                 pthread_cond_signal(&admin_sq->cond);
                 return;
             case NVME_DOORBELL_ADMIN_COMPLETION:
