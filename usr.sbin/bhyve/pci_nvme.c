@@ -142,6 +142,39 @@ const char* get_admin_command_text(enum nvme_admin_opcode opc)
             assert(0 && "unknown opc\n");
     }
 }
+
+const char* get_feature_text(enum nvme_feature feature)
+{
+    switch (feature) {
+        case NVME_FEAT_ARBITRATION:
+            return "arbitation";
+        case NVME_FEAT_POWER_MANAGEMENT:		
+            return "power management";
+        case NVME_FEAT_LBA_RANGE_TYPE:	
+            return "LBA range type";
+        case NVME_FEAT_TEMPERATURE_THRESHOLD:
+            return "temperature threshold";
+        case NVME_FEAT_ERROR_RECOVERY:	
+            return "error recovery";
+        case NVME_FEAT_VOLATILE_WRITE_CACHE:
+            return "volatile write cache";
+        case NVME_FEAT_NUMBER_OF_QUEUES:		
+            return "number of queues";
+        case NVME_FEAT_INTERRUPT_COALESCING:
+            return "interrupt coalescing";
+        case NVME_FEAT_INTERRUPT_VECTOR_CONFIGURATION:
+            return "interrupt vector configuration";
+        case NVME_FEAT_WRITE_ATOMICITY:		
+            return "write atmicity";
+        case NVME_FEAT_ASYNC_EVENT_CONFIGURATION:
+            return "asynchronous event configuration";
+        case NVME_FEAT_SOFTWARE_PROGRESS_MARKER:
+            return "software progress makers";
+        default:
+            assert(0 && "unknown feature");
+    }
+}
+
 #endif
 
 #define MAX_CQ_NUM 2
@@ -330,17 +363,65 @@ pci_nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
     return;
 }
 
+static void
+pci_nvme_execute_set_feature_command(struct pci_nvme_softc* sc,
+        struct nvme_command *command,
+        struct nvme_completion* cmp_entry)
+{
+    cmp_entry->cdw0 = 0x00000000;
+    enum nvme_feature feature = command->cdw10 & 0xf;
+    DPRINTF("set feature [%s]\n", get_feature_text(feature));
+    switch (feature) {
+/*         case NVME_FEAT_NUMBER_OF_QUEUES: */
+/*             sc->features.num_of_queues.raw = command->cdw11 & 0xffff; */
+/*             DPRINTF("SET_FEATURE cmd: ncqr 0x%x, nsqr 0x%x\n", */
+/*                     (command->cdw11 >> 16), (command->cdw11 & 0xffff)); */
+/*             cmp_entry->status.sc = 0x00; */
+/*             cmp_entry->status.sct = 0x0; */
+/*             if (pci_msix_enabled(sc->pi)) { */
+/*                 DPRINTF("generate msix, table_count %d, \n", */
+/*                         sc->pi->pi_msix.table_count); */
+/*                 pci_generate_msix(sc->pi, 0); */
+/*             } */
+/*             else { */
+/*                 assert(0 && "pci_msix is disable?"); */
+/*             } */
+/*             break; */
 
+/*         case NVME_FEAT_ASYNC_EVENT_CONFIGURATION: */
+/*             //TODO  */
+/*             sc->features.async_event_config.raw = command->cdw11; */
+/*             cmp_entry->status.sc = 0x00; */
+/*             cmp_entry->status.sct = 0x0; */
+/*             pci_generate_msix(sc->pi, 0); */
+/*             break; */
+
+/*         case NVME_FEAT_INTERRUPT_COALESCING: */
+/*             DPRINTF("interrupt coalescing cdw11 0x%x\n", command->cdw11); */
+/*             cmp_entry->status.sc = 0x00; */
+/*             cmp_entry->status.sct = 0x0; */
+/*             sc->features.interrupt_coalscing.bits.thr = command->cdw11 & 0xff; */
+/*             sc->features.interrupt_coalscing.bits.time = */
+/*                 (command->cdw11 >> 8) & 0xff; */
+/*             pci_generate_msix(sc->pi, 0); */
+/*             break; */
+
+        default:
+            assert(0 && "this feature is not implemented");
+    }
+
+
+}
 
 static void
-pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
+pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 {
     struct nvme_command* command =
         (struct nvme_command*)(sc->sqs[0].base_addr +
-                               sizeof(struct nvme_command) * *head);
+                               sizeof(struct nvme_command) * *sq_head);
     struct nvme_completion_queue* admin_cq = &sc->cqs[0];
     struct nvme_completion* completion_entry =
-        (struct nvme_completion*)(sc->regs.acq +
+        (struct nvme_completion*)(sc->cqs[0].base_addr +
                                   sizeof(struct nvme_completion) *
                                       admin_cq->tail);
 
@@ -350,21 +431,34 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
             pci_nvme_execute_create_io_cq_command(sc, command,
                                                   completion_entry);
             break;
+        case NVME_OPC_SET_FEATURES:
+            pci_nvme_execute_set_feature_command(sc, command, completion_entry);
+            break;
 
         default:
             assert(0 && "the admin command is not yet implemented");
     }
 
-    completion_entry->sqid = 0;
-    completion_entry->sqhd = *head;
-    completion_entry->cid = command->cid;
-    completion_entry->status.p != completion_entry->status.p;
-    *head++;
-    if(*head == sc->regs.aqa.bits.acqs) 
-    {
-        *head = 0;
+    if(command->opc != NVME_OPC_ASYNC_EVENT_REQUEST) {
+        completion_entry->sqid = 0;
+        completion_entry->sqhd = *sq_head;
+        completion_entry->cid = command->cid;
+        completion_entry->status.p != completion_entry->status.p;
+
+        admin_cq->tail++;
+        if(sc->regs.aqa.bits.acqs == admin_cq->tail)
+        {
+            admin_cq->tail = 0;
+        }
+
+        pci_generate_msix(sc->pi, 0);
     }
-    pci_generate_msix(sc->pi, 0);
+
+    *sq_head++;
+    if(*sq_head == sc->regs.aqa.bits.asqs) 
+    {
+        *sq_head = 0;
+    }
 }
 
 
@@ -386,8 +480,6 @@ pci_nvme_admin_cmd_exec_thr(void* arg)
     }
     pthread_mutex_unlock(&admin_sq->mtx);
 }
-
-
 
 static int 
 pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
