@@ -5,7 +5,7 @@
 PROG=	bhyve
 PACKAGE=	bhyve
 
-DEBUG_FLAGS= -g -O0
+DEBUG_FLAGS= -g -O0 -DNVME_DEBUG
 
 MAN=	bhyve.8
 

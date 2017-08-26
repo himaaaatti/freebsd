@@ -434,10 +434,10 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 
     DPRINTF("admin cmd exec [%s]\n", get_admin_command_text(command->opc));
     switch (command->opc) {
-        case NVME_OPC_CREATE_IO_SQ:
-            pci_nvme_execute_create_io_cq_command(sc, command,
-                                                  completion_entry);
-            break;
+/*         case NVME_OPC_CREATE_IO_SQ: */
+/*             pci_nvme_execute_create_io_cq_command(sc, command, */
+/*                                                   completion_entry); */
+/*             break; */
         case NVME_OPC_SET_FEATURES:
             pci_nvme_execute_set_feature_command(sc, command, completion_entry);
             break;
@@ -527,14 +527,14 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
      *
      */
 
-    /*     status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f); */
-    status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32, DOORBELL_LIMIT);
+    status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM64, 0x100f);
+/*     status = pci_emul_alloc_bar(pi, 0, PCIBAR_MEM32, DOORBELL_LIMIT); */
     if (status) {
         DPRINTF("Error is occurred in pci_emul_alloc_bar\n");
         return 1;
     }
 
-    status = pci_emul_add_msixcap(pi, 4, 2);
+    status = pci_emul_add_msixcap(pi, 4, 4);
     if (status) {
         DPRINTF("Error is occurred in pci_emul_add_msixcap\n");
         return 1;
