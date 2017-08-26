@@ -450,8 +450,12 @@ pci_nvme_execute_identify_command(struct pci_nvme_softc* sc,
         command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS ;
 
     switch(identify) {
-/*         case NVME_CMD_IDENTIFY_CNS_NAMESPACE: */
-/*             assert(0); */
+        case NVME_CMD_IDENTIFY_CNS_NAMESPACE:
+            memcpy((struct nvme_namespace_data*)dest_addr, &sc->namespace_data,
+                   sizeof(struct nvme_namespace_data));
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            break;
         case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
             memcpy((struct nvme_controller_data*)dest_addr,
                    &sc->controller_data, sizeof(struct nvme_controller_data));
