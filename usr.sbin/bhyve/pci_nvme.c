@@ -207,6 +207,17 @@ struct nvme_features {
             uint16_t reserved : 16;
         } __packed bits;
     } __packed interrupt_coalscing;
+
+    union {
+        uint32_t raw;
+        struct {
+            uint16_t smart : 8;
+            uint16_t ns_attr_noti : 1;
+            uint16_t fw_act_noti : 1;
+            uint16_t tele_log_noti : 1;
+            uint32_t reserved : 21;
+        } __packed bits;
+    } __packed async_event_config;
 };
 
 struct nvme_completion_queue {
@@ -402,23 +413,21 @@ pci_nvme_execute_set_feature_command(struct pci_nvme_softc* sc,
             cmp_entry->cdw0 = 0;
             break;
 
-/*         case NVME_FEAT_ASYNC_EVENT_CONFIGURATION: */
-/*             //TODO  */
-/*             sc->features.async_event_config.raw = command->cdw11; */
-/*             cmp_entry->status.sc = 0x00; */
-/*             cmp_entry->status.sct = 0x0; */
-/*             pci_generate_msix(sc->pi, 0); */
-/*             break; */
+        case NVME_FEAT_ASYNC_EVENT_CONFIGURATION:
+            //TODO 
+            sc->features.async_event_config.raw = command->cdw11;
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            break;
 
-/*         case NVME_FEAT_INTERRUPT_COALESCING: */
-/*             DPRINTF("interrupt coalescing cdw11 0x%x\n", command->cdw11); */
-/*             cmp_entry->status.sc = 0x00; */
-/*             cmp_entry->status.sct = 0x0; */
-/*             sc->features.interrupt_coalscing.bits.thr = command->cdw11 & 0xff; */
-/*             sc->features.interrupt_coalscing.bits.time = */
-/*                 (command->cdw11 >> 8) & 0xff; */
-/*             pci_generate_msix(sc->pi, 0); */
-/*             break; */
+        case NVME_FEAT_INTERRUPT_COALESCING:
+            DPRINTF("interrupt coalescing cdw11 0x%x\n", command->cdw11);
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            sc->features.interrupt_coalscing.bits.thr = command->cdw11 & 0xff;
+            sc->features.interrupt_coalscing.bits.time =
+                (command->cdw11 >> 8) & 0xff;
+            break;
 
         default:
             assert(0 && "this feature is not implemented");
@@ -564,6 +573,9 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
             break;
         case NVME_OPC_GET_FEATURES:
             pci_nvme_execute_get_feature_command(sc, command, completion_entry);
+            break;
+        case NVME_OPC_ASYNC_EVENT_REQUEST:
+            //TODO prepare for error and some events
             break;
 
         default:
@@ -744,7 +756,11 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
                 DPRINTF("CQ head is 0x%lx\n", value);
                 return;
             case NVME_DOORBELL_NVM_SUBMISSION:
+                assert(0);
             case NVME_DOORBELL_NVM_COMPLETION:
+                DPRINTF("Doorbell is knocked for admin completion.\n");
+                DPRINTF("CQ head is 0x%lx\n", value);
+                return;
 
             default:
                 assert(0);
