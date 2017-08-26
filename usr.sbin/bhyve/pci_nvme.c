@@ -460,6 +460,35 @@ pci_nvme_execute_identify_command(struct pci_nvme_softc* sc,
 }
 
 static void
+pci_nvme_execute_create_cq_command(struct pci_nvme_softc* sc,
+        struct nvme_command *command,
+        struct nvme_completion* cmp_entry)
+{
+    if (command->cdw11 & NVME_CREATE_IO_CQ_CDW11_PC) {
+        uint16_t qid = command->cdw10 & 0xffff;
+
+        if (sc->cqs[qid].base_addr != (uintptr_t)NULL) {
+            assert(0 && "the completion queue is already used");
+        }
+
+        uint16_t interrupt_vector = command->cdw11 >> 16;
+        uint16_t queue_size = command->cdw10 >> 16;
+        sc->cqs[qid].base_addr =
+            (uintptr_t)paddr_guest2host(ctx_from_sc(sc), command->prp1,
+                                  sizeof(struct nvme_completion) * queue_size);
+        sc->cqs[qid].size = queue_size;
+        sc->cqs[qid].qid = qid;
+        sc->cqs[qid].interrupt_vector = interrupt_vector;
+
+        cmp_entry->status.sc = 0x00;
+        cmp_entry->status.sct = 0x0;
+    }
+    else {
+        assert(0 && "not implemented");
+    }
+}
+
+static void
 pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 {
     struct nvme_command* command =
@@ -477,6 +506,8 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 /*             pci_nvme_execute_create_io_cq_command(sc, command, */
 /*                                                   completion_entry); */
 /*             break; */
+        case NVME_OPC_CREATE_IO_CQ:
+            pci_nvme_execute_create_cq_command(sc, command, completion_entry);
         case NVME_OPC_IDENTIFY:
             pci_nvme_execute_identify_command(sc, command, completion_entry);
             break;
