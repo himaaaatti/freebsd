@@ -710,6 +710,8 @@ pci_nvme_write(struct vmctx* ctx, int vcpu, struct pci_devinst* pi, int baridx,
     struct pci_nvme_softc *sc = pi->pi_arg;
 
     if(baridx == pci_msix_table_bar(pi) || baridx == pci_msix_pba_bar(pi)) {
+        DPRINTF("twrite baridx %d, offset 0x%lx, size %d, value %lx\n",
+                baridx, offset, size, value);
         pci_emul_msix_twrite(pi, offset, size, value);
         return;
     }
@@ -762,6 +764,8 @@ pci_nvme_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi, int baridx,
 {
     struct pci_nvme_softc* sc = pi->pi_arg;
     if (baridx == pci_msix_table_bar(pi) || baridx == pci_msix_table_bar(pi)) {
+        DPRINTF("tread baridx %d, offset 0x%lx, size %d\n",
+                baridx, regoff, size);
         return pci_emul_msix_tread(pi, regoff, size);
     }
 
