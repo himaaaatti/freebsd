@@ -496,6 +496,45 @@ pci_nvme_execute_create_cq_command(struct pci_nvme_softc* sc,
     }
 }
 
+enum temp_threshold_cdw11 {
+    NVME_TEMP_THRESHOLD_TMPTH = 0x0000ffff,
+    NVME_TEMP_THRESHOLD_TMPSEL = 0x000f0000,
+    NVME_TEMP_THRESHOLD_THSEL = 0x00300000,
+    NVME_TEMP_THRESHOLD_RESERVED = 0xffc00000,
+};
+
+static void 
+pci_nvme_execute_get_feature_command(struct pci_nvme_softc* sc,
+        struct nvme_command* command,
+        struct nvme_completion *cmp_entry)
+{
+    enum nvme_feature feature = command->cdw10 & 0xf;
+    switch (feature) {
+        case NVME_FEAT_TEMPERATURE_THRESHOLD: {
+            uint8_t thsel = (command->cdw11 & NVME_TEMP_THRESHOLD_THSEL) >> 20;
+            // over temparture threshold
+            if (thsel == 0x00) {
+                cmp_entry->cdw0 = sc->features.temparture_threshold.bits.over;
+            }
+            // under temparture threshold
+            else if (thsel == 0x1) {
+                cmp_entry->cdw0 = sc->features.temparture_threshold.bits.under;
+            }
+            else {
+                assert("the thsel is invalied");
+            }
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            pci_generate_msix(sc->pi, 0);
+            break;
+        }
+
+        default:
+            DPRINTF("feature number: 0x%x\n", feature);
+            assert(0 && "not implemented");
+    }
+}
+
 static void
 pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 {
@@ -522,6 +561,9 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
             break;
         case NVME_OPC_SET_FEATURES:
             pci_nvme_execute_set_feature_command(sc, command, completion_entry);
+            break;
+        case NVME_OPC_GET_FEATURES:
+            pci_nvme_execute_get_feature_command(sc, command, completion_entry);
             break;
 
         default:
