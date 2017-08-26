@@ -59,6 +59,13 @@ enum nvme_cc_bits {
     NVME_CC_RSV1 = 0xff000000,
 };
 
+enum create_io_cq_cdw11 {
+    NVME_CREATE_IO_CQ_CDW11_PC = 0x00000001,
+    NVME_CREATE_IO_CQ_CDW11_IEN = 0x00000002,
+    NVME_CREATE_IO_CQ_CDW11_RSV = 0x0000fffc,
+    NVME_CREATE_IO_CQ_CDW11_IV = 0xffff0000,
+};
+
 #ifdef NVME_DEBUG
 const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset,
                              bool is_read)
@@ -96,10 +103,49 @@ const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset,
             assert(0);
     }
 }
+
+const char* get_admin_command_text(enum nvme_admin_opcode opc)
+{
+    switch (opc) {
+        case NVME_OPC_DELETE_IO_SQ:
+            return "delete i/o submission queue";
+        case NVME_OPC_CREATE_IO_SQ:
+            return "create i/o submission queue";
+        case NVME_OPC_GET_LOG_PAGE:
+            return "get log page";
+        case NVME_OPC_DELETE_IO_CQ:
+            return "delete i/o completion queue";
+        case NVME_OPC_CREATE_IO_CQ:
+            return "create i/o completion queue";
+        case NVME_OPC_IDENTIFY:
+            return "identify";
+        case NVME_OPC_ABORT:
+            return "abort";
+        case NVME_OPC_SET_FEATURES:
+            return "set feature";
+        case NVME_OPC_GET_FEATURES:
+            return "get feature";
+        case NVME_OPC_ASYNC_EVENT_REQUEST:
+            return "async event request";
+        case NVME_OPC_FIRMWARE_ACTIVATE:
+            return "firmware activate";
+        case NVME_OPC_FIRMWARE_IMAGE_DOWNLOAD:
+            return "firmware image download";
+        case NVME_OPC_FORMAT_NVM:
+            return "format nvm";
+        case NVME_OPC_SECURITY_SEND:
+            return "security send";
+        case NVME_OPC_SECURITY_RECEIVE:
+            return "security receive";
+
+        default:
+            assert(0 && "unknown opc\n");
+    }
+}
 #endif
 
-#define MAX_CQ_NUM 4
-#define MAX_SQ_NUM 4
+#define MAX_CQ_NUM 2
+#define MAX_SQ_NUM 2
 #define DOORBELL_LIMIT 0x100f
 
 struct nvme_features {
@@ -151,6 +197,7 @@ struct pci_nvme_softc {
     struct nvme_controller_data controller_data;
     struct nvme_namespace_data namespace_data;
     struct nvme_features features;
+    pthread_t sq_work_thread[MAX_SQ_NUM];
 };
 
 static void 
@@ -221,6 +268,127 @@ pci_nvme_softc_reset(struct pci_nvme_softc* sc)
     sc->features.interrupt_coalscing.raw = 0;
 }
 
+/* struct nvme_submission_queue { */
+/*     uintptr_t base_addr; */
+/*     uint16_t size; */
+/*     uint16_t qid; */
+/*     uint16_t completion_qid; */
+/*     uint16_t tail; */
+/*     pthread_cond_t cond; */
+/*     pthread_mutex_t mtx; */
+/*     //XX ioreq */
+/* }; */
+
+
+static void
+pci_nvme_submission_queue_init(uint16_t size, int qid, int cqid,
+        struct nvme_submission_queue* queue_info)
+{
+    queue_info->base_addr = (uintptr_t)NULL;
+    queue_info->size = size;
+    queue_info->qid = qid;
+    queue_info->completion_qid = cqid;
+    queue_info->tail = 0;
+    pthread_cond_init(&queue_info->cond, NULL);
+    pthread_mutex_init(&queue_info->mtx, NULL);
+    //initialize ioreq for blockif
+}
+
+static void 
+pci_nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
+                                              struct nvme_command* command,
+                                              struct nvme_completion* cmp_entry)
+{
+    // TODO
+    //  IEN
+    DPRINTF("interrupt vector 0x%x\n", command->cdw11 >> 16);
+    if (command->cdw11 & NVME_CREATE_IO_CQ_CDW11_PC) {
+        uint16_t qid = command->cdw10 & 0xffff;
+
+        if (sc->cqs[qid].base_addr != (uintptr_t)NULL) {
+            assert(0 && "the completion queue is already used");
+        }
+
+        uint16_t interrupt_vector = command->cdw11 >> 16;
+        uint16_t queue_size = command->cdw10 >> 16;
+        sc->cqs[qid].base_addr =
+            (uintptr_t)paddr_guest2host(ctx_from_sc(sc), command->prp1,
+                                  sizeof(struct nvme_completion) * queue_size);
+        sc->cqs[qid].size = queue_size;
+        sc->cqs[qid].qid = qid;
+        sc->cqs[qid].interrupt_vector = interrupt_vector;
+
+        cmp_entry->status.sc = 0x00;
+        cmp_entry->status.sct = 0x0;
+        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
+                qid, queue_size, command->prp1, interrupt_vector);
+    }
+    else {
+        assert(0 && "not yet implemented");
+    }
+
+    return;
+}
+
+
+
+static void
+pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
+{
+    struct nvme_command* command =
+        (struct nvme_command*)(sc->regs.asq +
+                               sizeof(struct nvme_command) * *head);
+    struct nvme_completion_queue* admin_cq = &sc->cqs[0];
+    struct nvme_completion* completion_entry =
+        (struct nvme_completion*)(sc->regs.acq +
+                                  sizeof(struct nvme_completion) *
+                                      admin_cq->tail);
+
+    DPRINTF("admin cmd exec [%s]\n", get_admin_command_text(command->opc));
+    switch (command->opc) {
+        case NVME_OPC_CREATE_IO_SQ:
+            pci_nvme_execute_create_io_cq_command(sc, command,
+                                                  completion_entry);
+            break;
+
+        default:
+            assert(0 && "the admin command is not yet implemented");
+    }
+
+    completion_entry->sqid = 0;
+    completion_entry->sqhd = *head;
+    completion_entry->cid = command->cid;
+    completion_entry->status.p != completion_entry->status.p;
+    *head++;
+    if(*head == sc->regs.aqa.bits.acqs) 
+    {
+        *head = 0;
+    }
+    pci_generate_msix(sc->pi, 0);
+}
+
+
+
+static void *
+pci_nvme_admin_cmd_exec_thr(void* arg)
+{
+    struct pci_nvme_softc* sc = arg;
+    uint16_t sq_head = 0;
+    struct nvme_submission_queue* admin_sq = &sc->sqs[0];
+
+    pthread_mutex_lock(&admin_sq->mtx);
+    while(true) {
+        if(sq_head == admin_sq->tail) {
+            pthread_cond_wait(&admin_sq->cond, &admin_sq->mtx);
+        }
+        printf("receive signal in %s\n", __func__);
+        pci_nvme_admin_cmd_execute(sc, &sq_head);
+    }
+    pthread_mutex_unlock(&admin_sq->mtx);
+}
+
+
+
 static int 
 pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
 {
@@ -240,7 +408,7 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     DPRINTF("backing file is %s\n", opts);
 
     /* Configulation for pci */
-/*     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0953); */
+    /*     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0953); */
     pci_set_cfgdata16(pi, PCIR_DEVICE, 0x0111);
     pci_set_cfgdata16(pi, PCIR_VENDOR, 0x8086);
     pci_set_cfgdata8(pi, PCIR_CLASS, PCIC_STORAGE);
@@ -295,8 +463,19 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     sc->cqs = calloc(MAX_CQ_NUM, sizeof(struct nvme_completion_queue));
     sc->sqs = calloc(MAX_SQ_NUM, sizeof(struct nvme_submission_queue));
 
-    //TODO: Initialize Submission queue and pthread mutex and condition vairable.
-    
+    /* setup admin queues */
+    pci_nvme_submission_queue_init(sc->regs.aqa.bits.asqs, 0, 0, &sc->sqs[0]);
+    pthread_create(sc->sq_work_thread, NULL,
+            pci_nvme_admin_cmd_exec_thr, sc);
+    //TODO setup admin cq
+   
+    for (int i = 1; i < MAX_SQ_NUM; ++i) {
+        // TODO: Initialize submittion i/o queue
+    }
+    for (int i = 1; i < MAX_CQ_NUM; ++i) {
+        // TODO: Initialize completion i/o queue
+    }
+
     return 0;
 
 free_sc:
@@ -313,95 +492,16 @@ pci_nvme_setup_controller(struct pci_nvme_softc* sc)
     sc->regs.acq = 
         (uintptr_t)paddr_guest2host(ctx_from_sc(sc), sc->regs.acq,
                 sizeof(struct nvme_completion) * sc->regs.aqa.bits.acqs);
-}
 
-static void 
-pci_nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
-                                              struct nvme_command* command,
-                                              struct nvme_completion* cmp_entry)
-{
-    // TODO
-    //  IEN
-    DPRINTF("interrupt vector 0x%x\n", command->cdw11 >> 16);
-    if (command->cdw11 & NVME_CREATE_IO_CQ_CDW11_PC) {
-        uint16_t qid = command->cdw10 & 0xffff;
-
-        if (sc->cqs[qid].base_addr != (uintptr_t)NULL) {
-            assert(0 && "the completion queue is already used");
-        }
-
-        uint16_t interrupt_vector = command->cdw11 >> 16;
-        uint16_t queue_size = command->cdw10 >> 16;
-        sc->cqs[qid].base_addr =
-            (uintptr_t)paddr_guest2host(ctx_from_sc(sc), command->prp1,
-                                  sizeof(struct nvme_completion) * queue_size);
-        sc->cqs[qid].size = queue_size;
-        sc->cqs[qid].qid = qid;
-        sc->cqs[qid].interrupt_vector = interrupt_vector;
-
-        cmp_entry->status.sc = 0x00;
-        cmp_entry->status.sct = 0x0;
-        DPRINTF("qid %d, qsize 0x%x, addr 0x%lx, IV %d\n", 
-                qid, queue_size, command->prp1, interrupt_vector);
-    }
-    else {
-        assert(0 && "not yet implemented");
-    }
-
-    return;
-}
-
-static void
-pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
-{
-    struct nvme_command* command =
-        (struct nvme_command*)(sc->regs.asq +
-                               sizeof(struct nvme_command) * *head);
-    struct nvme_completion_queue* admin_cq = &sc->cqs[0];
-    struct nvme_completion* completion_entry =
-        (struct nvme_completion*)(sc->regs.acq +
-                                  sizeof(struct nvme_completion) *
-                                      admin_cq->tail);
-
-
-    switch (command->opc) {
-        case NVME_OPC_CREATE_IO_SQ:
-            pci_nvme_execute_create_io_cq_command(sc, command,
-                                                  completion_entry);
-            break;
-    }
-
-    completion_entry->sqid = 0;
-    completion_entry->sqhd = *head;
-    completion_entry->cid = command->cid;
-    completion_entry->status.p != completion_entry->status.p;
-    *head++;
-    if(*head == sc->regs.aqa.bits.acqs) 
-    {
-        *head = 0;
-    }
-    pci_generate_msix(sc->pi, 0);
-}
-
-static void
-pci_nvme_admin_cmd_exec_thr(void* arg)
-{
-    struct pci_nvme_softc* sc = arg;
-    uint16_t sq_head = 0;
-    struct nvme_submission_queue* admin_sq = &sc->sqs[0];
-
-    while(true) {
-        if(sq_head == admin_sq->tail) {
-            pthread_cond_wait(&admin_sq->cond, &admin_sq->mtx);
-        }
-        pci_nvme_admin_cmd_execute(sc, &sq_head);
-    }
+    sc->regs.csts.bits.rdy = 1;
 }
 
 static void
 pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
         uint64_t offset, uint64_t value, int size)
 {
+
+    struct nvme_submission_queue* admin_sq = &sc->sqs[0];
     /*
      * Guest write to doorbell registers
      * - offset
@@ -410,10 +510,12 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
     if (offset >= NVME_CR_IO_QUEUE_BASE && offset <= DOORBELL_LIMIT) {
         switch(offset) {
             case NVME_DOORBELL_ADMIN_SUBMISSION:
+                pthread_cond_signal(&admin_sq->cond);
+                return;
             case NVME_DOORBELL_ADMIN_COMPLETION:
                 DPRINTF("Doorbell is knocked for admin completion.\n");
                 DPRINTF("CQ head is 0x%lx\n", value);
-                break;
+                return;
             case NVME_DOORBELL_NVM_SUBMISSION:
             case NVME_DOORBELL_NVM_COMPLETION:
 
@@ -427,6 +529,8 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
      * - offset
      *   0x0000 ~ 0x1000
      */
+    DPRINTF("write %s , value is %lx\n", 
+            get_nvme_cr_text(offset, false), value);
     assert(size == 4 && "word size should be 4 (byte)");
     switch (offset){
         case NVME_CR_CC:
@@ -439,10 +543,12 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
              *      finished preparation, controller arrise CSTS.RDY bit.
              */
             if(!sc->regs.cc.bits.en && (value & NVME_CC_EN)) {
+                DPRINTF("nvme up\n");
                 pci_nvme_softc_reset(sc);
                 pci_nvme_setup_controller(sc);
             }
             if(sc->regs.cc.bits.en && !(value & NVME_CC_EN)) {
+                DPRINTF("nvme down\n");
                 sc->regs.csts.bits.rdy = 0;
             }
 
@@ -500,7 +606,7 @@ pci_nvme_write(struct vmctx* ctx, int vcpu, struct pci_devinst* pi, int baridx,
 {
     struct pci_nvme_softc *sc = pi->pi_arg;
 
-    if(baridx == pci_msix_table_bar(pi) || baridx == pci_msix_table_bar(pi)) {
+    if(baridx == pci_msix_table_bar(pi) || baridx == pci_msix_pba_bar(pi)) {
         pci_emul_msix_twrite(pi, offset, size, value);
         return;
     }
@@ -508,8 +614,10 @@ pci_nvme_write(struct vmctx* ctx, int vcpu, struct pci_devinst* pi, int baridx,
     switch (baridx) {
         case 0:
             pci_nvme_write_bar_0(ctx, sc, offset, value, size);
+            break;
+
         default:
-            DPRINTF("unknown regoff value: 0x%lx, size %d in %s\n", offset, size,
+            DPRINTF("unknown baridx: 0x%x, size %d in %s\n", baridx, size,
                     __func__);
             assert(0);
     }
@@ -531,6 +639,7 @@ pci_nvme_read_bar_0(struct pci_nvme_softc* sc, uint64_t offset, int size)
             return (uint64_t)sc->regs.vs;
 
         case NVME_CR_CC:
+            DPRINTF("CC raw 0x%x\n", sc->regs.cc.raw);
             return (uint64_t)sc->regs.cc.raw;
 
         case NVME_CR_CSTS:
