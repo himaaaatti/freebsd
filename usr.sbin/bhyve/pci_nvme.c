@@ -336,7 +336,7 @@ static void
 pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* head)
 {
     struct nvme_command* command =
-        (struct nvme_command*)(sc->regs.asq +
+        (struct nvme_command*)(sc->sqs[0].base_addr +
                                sizeof(struct nvme_command) * *head);
     struct nvme_completion_queue* admin_cq = &sc->cqs[0];
     struct nvme_completion* completion_entry =
@@ -398,8 +398,8 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
 
 #ifdef NVME_DEBUG
     dbg = fopen("/tmp/nvme_emul_log", "w+");
-    DPRINTF("----- initialize nvme controller emulator -----\n");
 #endif
+    DPRINTF("----- initialize nvme controller emulator -----\n");
 
     if (opts == NULL) {
         fprintf(stderr, "pci_nvme: backing device required");
@@ -486,12 +486,16 @@ free_sc:
 static void
 pci_nvme_setup_controller(struct pci_nvme_softc* sc)
 {
-    sc->regs.asq =
+    sc->sqs[0].base_addr =
         (uintptr_t)paddr_guest2host(ctx_from_sc(sc), sc->regs.asq,
                 sizeof(struct nvme_command) * sc->regs.aqa.bits.asqs);
-    sc->regs.acq = 
+    sc->cqs[0].base_addr = 
         (uintptr_t)paddr_guest2host(ctx_from_sc(sc), sc->regs.acq,
                 sizeof(struct nvme_completion) * sc->regs.aqa.bits.acqs);
+
+    DPRINTF("asq 0x%lx, acq 0x%lx in guest\n", sc->regs.asq, sc->regs.acq);
+    DPRINTF("admin sq base_addr 0x%lx, cq base_addr 0x%lx in host\n",
+            sc->sqs[0].base_addr, sc->cqs[0].base_addr);
 
     sc->regs.csts.bits.rdy = 1;
 }
@@ -544,7 +548,7 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
              */
             if(!sc->regs.cc.bits.en && (value & NVME_CC_EN)) {
                 DPRINTF("nvme up\n");
-                pci_nvme_softc_reset(sc);
+/*                 pci_nvme_softc_reset(sc); */
                 pci_nvme_setup_controller(sc);
             }
             if(sc->regs.cc.bits.en && !(value & NVME_CC_EN)) {
