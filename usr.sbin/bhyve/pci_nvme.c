@@ -329,13 +329,12 @@ pci_nvme_softc_reset(struct pci_nvme_softc* sc)
 
 
 static void
-pci_nvme_sq_init(uint16_t size, int qid, int cqid,
-        struct nvme_submission_queue* queue_info)
+pci_nvme_sq_init(struct nvme_submission_queue* queue_info)
 {
     queue_info->base_addr = (uintptr_t)NULL;
-    queue_info->size = size;
-    queue_info->qid = qid;
-    queue_info->completion_qid = cqid;
+    queue_info->size = 0;
+    queue_info->qid = 0;
+    queue_info->completion_qid = 0;
     queue_info->tail = 0;
     pthread_cond_init(&queue_info->cond, NULL);
     pthread_mutex_init(&queue_info->mtx, NULL);
@@ -343,14 +342,13 @@ pci_nvme_sq_init(uint16_t size, int qid, int cqid,
 }
 
 static void
-pci_nvme_cq_init(uint16_t size, int qid, int interrupt_vector, 
-        struct nvme_completion_queue* cq_info)
+pci_nvme_cq_init(struct nvme_completion_queue* cq_info)
 {
     cq_info->base_addr = (uintptr_t)NULL;
-    cq_info->size = size;
-    cq_info->qid = qid;
+    cq_info->size = 0;
+    cq_info->qid = 0;
     cq_info->tail = 0;
-    cq_info->interrupt_vector = interrupt_vector;
+    cq_info->interrupt_vector = 0;
 }
 
 enum create_io_sq_cdw11 {
@@ -604,22 +602,45 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
     }
 }
 
-static void *
-pci_nvme_admin_cmd_exec_thr(void* arg)
+static void
+pci_nvme_nvm_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 {
-    struct pci_nvme_softc* sc = arg;
-    uint16_t sq_head = 0;
-    struct nvme_submission_queue* admin_sq = &sc->sqs[0];
+    assert(0);
+}
 
-    pthread_mutex_lock(&admin_sq->mtx);
+struct nvme_thread_arg {
+    struct pci_nvme_softc *sc;
+    int qid; 
+};
+
+static void *
+pci_nvme_command_execute_thr(void* arg)
+{
+    struct nvme_thread_arg* thr_arg = arg;
+    struct pci_nvme_softc* sc = thr_arg->sc;
+    int qid = thr_arg->qid;
+    uint16_t sq_head = 0;
+    struct nvme_submission_queue* sq = &sc->sqs[qid];
+
+    void (*cmd_execute)(struct pci_nvme_softc*, uint16_t*);
+    if(qid == 0) {
+        cmd_execute = pci_nvme_admin_cmd_execute;
+    }
+    else {
+        cmd_execute = pci_nvme_nvm_cmd_execute;
+    }
+
+    free(thr_arg);
+
+    pthread_mutex_lock(&sq->mtx);
     while(true) {
-        while(sq_head == admin_sq->tail) {
-            pthread_cond_wait(&admin_sq->cond, &admin_sq->mtx);
+        while(sq_head == sq->tail) {
+            pthread_cond_wait(&sq->cond, &sq->mtx);
         }
-        pci_nvme_admin_cmd_execute(sc, &sq_head);
+        cmd_execute(sc, &sq_head);
         DPRINTF("cq tail is %x\n", sc->cqs[0].tail);
     }
-    pthread_mutex_unlock(&admin_sq->mtx);
+    pthread_mutex_unlock(&sq->mtx);
 }
 
 static int 
@@ -696,17 +717,31 @@ pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     sc->cqs = calloc(MAX_CQ_NUM, sizeof(struct nvme_completion_queue));
     sc->sqs = calloc(MAX_SQ_NUM, sizeof(struct nvme_submission_queue));
 
-    /* setup admin queues */
-    pci_nvme_sq_init(sc->regs.aqa.bits.asqs, 0, 0, &sc->sqs[0]);
-    pci_nvme_cq_init(sc->regs.aqa.bits.acqs, 0, 0, &sc->cqs[0]);
-    pthread_create(sc->sq_work_thread, NULL,
-            pci_nvme_admin_cmd_exec_thr, sc);
-   
-    for (int i = 1; i < MAX_SQ_NUM; ++i) {
-        // TODO: Initialize submittion i/o queue
+    struct nvme_thread_arg* thread_arg;
+    for(int i=0; i<MAX_SQ_NUM; ++i)
+    {
+        pci_nvme_sq_init(&sc->sqs[i]);
     }
-    for (int i = 1; i < MAX_CQ_NUM; ++i) {
-        // TODO: Initialize completion i/o queue
+
+    for(int i=0; i<MAX_CQ_NUM; ++i)
+    {
+        pci_nvme_cq_init(&sc->cqs[i]);
+    }
+
+    /* setup admin queues */
+    sc->sqs[0].size = sc->regs.aqa.bits.asqs;
+    sc->cqs[0].size = sc->regs.aqa.bits.acqs;
+    sc->cqs[0].interrupt_vector = 0;
+   
+    /* run worker thread */
+    for(int i=0; i<MAX_SQ_NUM; ++i)
+    {
+        thread_arg = calloc(1, sizeof(struct nvme_thread_arg));
+        thread_arg->sc = sc;
+        thread_arg->qid = i;
+        pthread_create(sc->sq_work_thread, NULL,
+                pci_nvme_command_execute_thr, thread_arg);
+
     }
 
     return 0;
