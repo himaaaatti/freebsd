@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 #include <pthread.h>
 
 #include <dev/nvme/nvme.h>
@@ -420,6 +421,44 @@ pci_nvme_execute_set_feature_command(struct pci_nvme_softc* sc,
     }
 }
 
+enum nvme_cmd_identify_data {
+    NVME_CMD_IDENTIFY_CNS_NAMESPACE = 0x0,
+    NVME_CMD_IDENTIFY_CNS_CONTROLLER = 0x1,
+    NVME_CMD_IDENTIFY_CNS_NAMESPACE_LIST = 0x2,
+    NVME_CMD_IDENTIFY_CNS_RESERVED = 0x3,
+};
+
+enum nvme_cmd_identify_cdw10 {
+    NVME_CMD_IDENTIFY_CDW10_CNTID = 0xffff0000,
+    NVME_CMD_IDENTIFY_CDW10_RSV = 0x0000ff00,
+    NVME_CMD_IDENTIFY_CDW10_CNS = 0x000000ff,
+};
+
+static void
+pci_nvme_execute_identify_command(struct pci_nvme_softc* sc,
+        struct nvme_command *command, 
+        struct nvme_completion* cmp_entry)
+{
+    uintptr_t dest_addr = (uintptr_t)paddr_guest2host(
+        ctx_from_sc(sc), command->prp1, sizeof(struct nvme_controller_data));
+
+    enum nvme_cmd_identify_data identify =
+        command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS ;
+
+    switch(identify) {
+/*         case NVME_CMD_IDENTIFY_CNS_NAMESPACE: */
+/*             assert(0); */
+        case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
+            memcpy((struct nvme_controller_data*)dest_addr,
+                   &sc->controller_data, sizeof(struct nvme_controller_data));
+            cmp_entry->status.sc = 0x00;
+            cmp_entry->status.sct = 0x0;
+            break;
+        default:
+            assert(0);
+    }
+}
+
 static void
 pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 {
@@ -438,6 +477,9 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 /*             pci_nvme_execute_create_io_cq_command(sc, command, */
 /*                                                   completion_entry); */
 /*             break; */
+        case NVME_OPC_IDENTIFY:
+            pci_nvme_execute_identify_command(sc, command, completion_entry);
+            break;
         case NVME_OPC_SET_FEATURES:
             pci_nvme_execute_set_feature_command(sc, command, completion_entry);
             break;
