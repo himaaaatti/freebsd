@@ -450,7 +450,7 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
         completion_entry->sqid = 0;
         completion_entry->sqhd = *sq_head;
         completion_entry->cid = command->cid;
-        completion_entry->status.p != completion_entry->status.p;
+        completion_entry->status.p = !completion_entry->status.p;
 
         admin_cq->tail++;
         if(sc->regs.aqa.bits.acqs == admin_cq->tail)
