@@ -176,6 +176,27 @@ const char* get_feature_text(enum nvme_feature feature)
     }
 }
 
+const char* get_nvm_command_text(enum nvme_nvm_opcode opc)
+{
+    switch (opc) {
+        case NVME_OPC_FLUSH:
+            return "flush";
+        case NVME_OPC_WRITE:
+            return "write";
+        case NVME_OPC_READ:
+            return "read";
+        case NVME_OPC_WRITE_UNCORRECTABLE:
+            return "write uncorrectable";
+        case NVME_OPC_COMPARE:
+            return "compare";
+        case NVME_OPC_DATASET_MANAGEMENT:
+            return "dataset management";
+
+        default:
+            assert(0 && "unknown opc");
+    }
+}
+
 #endif
 
 #define MAX_CQ_NUM 2
@@ -234,6 +255,7 @@ struct nvme_submission_queue {
     uint16_t qid;
     uint16_t completion_qid;
     uint16_t tail;
+    uint16_t head;
     pthread_cond_t cond;
     pthread_mutex_t mtx;
     //XX ioreq
@@ -543,11 +565,12 @@ pci_nvme_execute_get_feature_command(struct pci_nvme_softc* sc,
 }
 
 static void
-pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
+pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, 
+        struct nvme_submission_queue* sq)
 {
     struct nvme_command* command =
-        (struct nvme_command*)(sc->sqs[0].base_addr +
-                               sizeof(struct nvme_command) * *sq_head);
+        (struct nvme_command*)(sq->base_addr +
+                               sizeof(struct nvme_command) * sq->head);
     struct nvme_completion_queue* admin_cq = &sc->cqs[0];
     struct nvme_completion* completion_entry =
         (struct nvme_completion*)(sc->cqs[0].base_addr +
@@ -582,7 +605,7 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
 
     if(command->opc != NVME_OPC_ASYNC_EVENT_REQUEST) {
         completion_entry->sqid = 0;
-        completion_entry->sqhd = *sq_head;
+        completion_entry->sqhd = sq->head;
         completion_entry->cid = command->cid;
         completion_entry->status.p = !completion_entry->status.p;
 
@@ -595,17 +618,35 @@ pci_nvme_admin_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
         pci_generate_msix(sc->pi, 0);
     }
 
-    (*sq_head)++;
-    if(*sq_head == sc->regs.aqa.bits.asqs) 
+    sq->head++;
+    if(sq->head == sc->regs.aqa.bits.asqs) 
     {
-        *sq_head = 0;
+        sq->head = 0;
     }
 }
 
 static void
-pci_nvme_nvm_cmd_execute(struct pci_nvme_softc* sc, uint16_t* sq_head)
+pci_nvme_nvm_cmd_execute(struct pci_nvme_softc* sc, 
+        struct nvme_submission_queue* sq)
 {
-    assert(0);
+    struct nvme_command* command =
+        (struct nvme_command*)(sq->base_addr +
+                               sizeof(struct nvme_command) * sq->head);
+/*     struct nvme_completion_queue* cq = &sc->cqs[sq->completion_qid]; */
+/*     struct nvme_completion* completion_entry = */
+/*         (struct nvme_completion*)(sc->cqs[0].base_addr + */
+/*                                   sizeof(struct nvme_completion) * */
+/*                                       cq->tail); */
+    DPRINTF("nvm command exec [%s]\n", get_nvm_command_text(command->opc));
+    switch (command->opc) {
+        case NVME_OPC_READ:
+        case NVME_OPC_WRITE:
+            pci_nvme_execute_nvm_read_write_command();
+            break;
+
+        default:
+            assert(0);
+    }
 }
 
 struct nvme_thread_arg {
@@ -619,10 +660,10 @@ pci_nvme_command_execute_thr(void* arg)
     struct nvme_thread_arg* thr_arg = arg;
     struct pci_nvme_softc* sc = thr_arg->sc;
     int qid = thr_arg->qid;
-    uint16_t sq_head = 0;
+/*     uint16_t sq_head = 0; */
     struct nvme_submission_queue* sq = &sc->sqs[qid];
 
-    void (*cmd_execute)(struct pci_nvme_softc*, uint16_t*);
+    void (*cmd_execute)(struct pci_nvme_softc*, struct nvme_submission_queue*);
     if(qid == 0) {
         cmd_execute = pci_nvme_admin_cmd_execute;
     }
@@ -634,10 +675,10 @@ pci_nvme_command_execute_thr(void* arg)
 
     pthread_mutex_lock(&sq->mtx);
     while(true) {
-        while(sq_head == sq->tail) {
+        while(sq->head == sq->tail) {
             pthread_cond_wait(&sq->cond, &sq->mtx);
         }
-        cmd_execute(sc, &sq_head);
+        cmd_execute(sc, sq);
         DPRINTF("cq tail is %x\n", sc->cqs[0].tail);
     }
     pthread_mutex_unlock(&sq->mtx);
@@ -774,6 +815,7 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
 {
 
     struct nvme_submission_queue* admin_sq = &sc->sqs[0];
+    struct nvme_submission_queue* nvm_sq = &sc->sqs[1];
     /*
      * Guest write to doorbell registers
      * - offset
@@ -791,7 +833,9 @@ pci_nvme_write_bar_0(struct vmctx* ctx, struct pci_nvme_softc* sc,
                 DPRINTF("CQ head is 0x%lx\n", value);
                 return;
             case NVME_DOORBELL_NVM_SUBMISSION:
-                assert(0);
+                nvm_sq->tail = value;
+                pthread_cond_signal(&nvm_sq->cond);
+                break;
             case NVME_DOORBELL_NVM_COMPLETION:
                 DPRINTF("Doorbell is knocked for admin completion.\n");
                 DPRINTF("CQ head is 0x%lx\n", value);
