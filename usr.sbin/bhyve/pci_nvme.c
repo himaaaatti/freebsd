@@ -219,7 +219,7 @@ struct nvme_features {
 struct nvme_completion_queue_info {
     uintptr_t base_addr;
     uint16_t size;
-    uint16_t head;
+    uint16_t tail;
     uint16_t qid;
     uint16_t interrupt_vector;
     pthread_mutex_t mtx;
@@ -330,6 +330,7 @@ static void initialize_identify(struct pci_nvme_softc* sc)
     sc->namespace_data.nlbaf = 0x1;
 
     uint64_t block_size = blockif_size(sc->bctx);
+/*     sc->namespace_data.nsze = block_size / (2 << (lba_data_size - 1)); */
     sc->namespace_data.nsze = block_size / (2 << (lba_data_size - 1));
     sc->namespace_data.ncap = block_size / (2 << (lba_data_size - 1));
 }
@@ -353,6 +354,17 @@ static int pci_nvme_submission_queue_init(
 
     TAILQ_INIT(&qinfo->iobhd);
     return 0;
+}
+
+static void
+pci_nvme_cq_init(struct nvme_completion_queue_info* cqinfo) 
+{
+    pthread_mutex_init(&cqinfo->mtx, NULL);
+    cqinfo->base_addr = (uintptr_t)NULL;
+    cqinfo->size = -1;
+    cqinfo->tail = 0;
+    cqinfo->qid = -1;
+    cqinfo->interrupt_vector = -1;
 }
 
 static int pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
@@ -409,6 +421,9 @@ static int pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
     int number_of_completion_queues = 4;
     sc->cqs_info = calloc(number_of_completion_queues,
                           sizeof(struct nvme_completion_queue_info));
+    for(int i=0; i< number_of_completion_queues; ++i) {
+        pci_nvme_cq_init(&sc->cqs_info[i]);
+    }
 
     int number_of_submission_queues = 4;
     sc->sqs_info = calloc(number_of_submission_queues,
@@ -576,7 +591,8 @@ enum create_io_cq_cdw11 {
     NVME_CREATE_IO_CQ_CDW11_IV = 0xffff0000,
 };
 
-static void nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
+static void 
+nvme_execute_create_io_cq_command(struct pci_nvme_softc* sc,
                                               struct nvme_command* command,
                                               struct nvme_completion* cmp_entry)
 {
@@ -752,7 +768,7 @@ static void pci_nvme_blockif_ioreq_cb(struct blockif_req* br, int err)
     struct nvme_completion* completion_entry =
         (struct nvme_completion*)(cq_info->base_addr +
                                   sizeof(struct nvme_completion) *
-                                      cq_info->head);
+                                      cq_info->tail);
 
     nreq->completion_entry.status.sct = 0x0;
     nreq->completion_entry.status.sc = 0x00;
@@ -764,17 +780,21 @@ static void pci_nvme_blockif_ioreq_cb(struct blockif_req* br, int err)
            sizeof(struct nvme_completion));
     completion_entry->status.p = !status_phase;
 
-    cq_info->head++;
-    if (cq_info->head > cq_info->size) {
-        cq_info->head = 0;
+    DPRINTF("br_resid 0x%lx\n", br->br_resid);
+    DPRINTF("cq_head 0x%x(max 0x%x), qid %d, status phase %x IV %d\n",
+            cq_info->tail, cq_info->size, cq_info->qid, 
+            !status_phase, cq_info->interrupt_vector);
+
+    cq_info->tail++;
+/*     if (cq_info->tail == cq_info->size) { */
+    if (cq_info->tail > cq_info->size) {
+        cq_info->tail = 0;
     }
 
     TAILQ_REMOVE(&sq_info->iobhd, nreq, io_blist);
 
     STAILQ_INSERT_TAIL(&sq_info->iofhd, nreq, io_flist);
 
-    DPRINTF("cq_head 0x%x, qid %d, status phase %x IV %d\n", cq_info->head,
-            cq_info->qid, !status_phase, cq_info->interrupt_vector);
     pci_generate_msix(nreq->sc->pi, cq_info->interrupt_vector);
     pthread_mutex_unlock(&cq_info->mtx);
 }
@@ -789,10 +809,10 @@ static void nvme_nvm_command_read_write(
     uintptr_t starting_lba = ((uint64_t)command->cdw11 << 32) | command->cdw10;
     // NLB (number of logic block) is a 0's based value
     uint16_t number_of_lb = (command->cdw12 & 0xffff) + 1;
-    ssize_t logic_block_size = 1 << sc->namespace_data.lbaf[0].lbads;
+    int logic_block_size = 1 << sc->namespace_data.lbaf[0].lbads;
 
-    DPRINTF("slba %lx, nlba %x, size 2^%d\n", starting_lba, number_of_lb,
-            sc->namespace_data.lbaf[0].lbads);
+    DPRINTF("slba 0x%lx, nlba 0x%x, lb size 0x%x\n",
+            starting_lba, number_of_lb, logic_block_size);
     DPRINTF("sqhd: 0x%x, destination addr : 0x%lx\n", sqhd, command->prp1);
 
     /*     struct nvme_ioreq *nreq = sq_info->ioreq; */
@@ -805,14 +825,89 @@ static void nvme_nvm_command_read_write(
     nreq->completion_entry.cid = command->cid;
     nreq->cq_info = &sc->cqs_info[sq_info->completion_qid];
     nreq->sc = sc;
+    nreq->sq_info = sq_info;
     DPRINTF("sqid %d, cqid %d\n", sq_info->qid, sq_info->completion_qid);
 
+    
+    int data_size = number_of_lb * logic_block_size;
+    int page_num = data_size / (1 << 12);
+    //TODO page size is depend on CC.MPS
+    DPRINTF("all size 0x%x, page num 0x%x\n", 
+            number_of_lb * logic_block_size, 
+            page_num);
+    DPRINTF("PRP 0x%lx 0x%lx\n", command->prp1, command->prp2);
+    DPRINTF("CDW0 0x%x\n", command->rsvd1);
+/*     if(page_num != 1) { */
+/*         DPRINTF("%lx \n", *(uintptr_t*)command->prp2); */
+/*     } */
+
+/*     for(int i=0; i < page_num - 1; ++i){ */
+/*         uint64_t *prp_list = (uint64_t*)command->prp2; */
+/*         DPRINTF("0x%lx\n", prp_list[i]); */
+/*     } */
+
     struct blockif_req* breq = &nreq->io_req;
-    breq->br_iovcnt = 1;
-    breq->br_iov[0].iov_base =
-        paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
-                         (uint8_t)number_of_lb * logic_block_size);
-    breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
+
+    if(command->prp2 == 0) {
+
+        breq->br_iov[0].iov_base =
+            paddr_guest2host(sc->pi->pi_vmctx, command->prp1, data_size);
+        breq->br_iov[0].iov_len = data_size;
+        breq->br_iovcnt = 1;
+    }
+    else {
+
+        breq->br_iovcnt = page_num;
+        if(page_num == 2) {
+            breq->br_iov[0].iov_base =
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
+                        1 << 12); // page size (4k)
+
+            breq->br_iov[1].iov_len = number_of_lb * logic_block_size;
+            breq->br_iov[1].iov_base = 
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp2,
+                        number_of_lb * logic_block_size - (1 << 12));
+        }
+        else if(page_num > 2) {
+
+            breq->br_iov[0].iov_base =
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
+                        (1 << 12));
+
+            breq->br_iov[0].iov_len = 1 << 12;
+
+            data_size -= 1 << 12;
+
+            uint64_t* prp_list = paddr_guest2host(
+                    sc->pi->pi_vmctx, 
+                    command->prp2,
+                    sizeof(uint64_t) * (page_num - 1));
+            for(int i=0; i < (page_num - 2); ++i) {
+                DPRINTF("prp_list[%d] 0x%lx\n", i, prp_list[i]);
+
+                breq->br_iov[i + 1].iov_base = 
+                    paddr_guest2host(sc->pi->pi_vmctx, prp_list[i], (1 << 12));
+                breq->br_iov[i + 1].iov_len = 1 << 12;
+                data_size -= 1 << 12;
+            }
+
+            DPRINTF("prp_list[%d] 0x%lx\n", 
+                    page_num - 2, prp_list[page_num - 2]);
+            DPRINTF("data size 0x%x\n", data_size);
+            breq->br_iov[page_num - 1].iov_base = 
+                paddr_guest2host(sc->pi->pi_vmctx, 
+                        prp_list[page_num - 2], data_size);
+            breq->br_iov[page_num - 1].iov_len = data_size;
+        }
+        else {
+            breq->br_iov[0].iov_base =
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
+                        number_of_lb * logic_block_size);
+
+            breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
+        }
+
+    }
     breq->br_offset = starting_lba * logic_block_size;
     breq->br_resid = number_of_lb * logic_block_size;
     breq->br_callback = pci_nvme_blockif_ioreq_cb;
@@ -834,38 +929,38 @@ static void nvme_nvm_command_read_write(
     assert(err == 0 && "blockif_read or blockif_write failed");
 }
 
-static void nvme_nvm_command_flush(struct pci_nvme_softc* sc,
-                                   struct nvme_submission_queue_info* sq_info,
-                                   uint16_t cid,
-                                   uint16_t sqhd)
-{
-    assert("not yet implemented");
-    struct nvme_completion_queue_info* cq_info =
-        &sc->cqs_info[sq_info->completion_qid];
+/* static void nvme_nvm_command_flush(struct pci_nvme_softc* sc, */
+/*                                    struct nvme_submission_queue_info* sq_info, */
+/*                                    uint16_t cid, */
+/*                                    uint16_t sqhd) */
+/* { */
+/*     assert("not yet implemented"); */
+/*     struct nvme_completion_queue_info* cq_info = */
+/*         &sc->cqs_info[sq_info->completion_qid]; */
 
-    pthread_mutex_lock(&cq_info->mtx);
-    struct nvme_completion* completion_entry =
-        (struct nvme_completion*)(cq_info->base_addr +
-                                  sizeof(struct nvme_completion) *
-                                      cq_info->head);
+/*     pthread_mutex_lock(&cq_info->mtx); */
+/*     struct nvme_completion* completion_entry = */
+/*         (struct nvme_completion*)(cq_info->base_addr + */
+/*                                   sizeof(struct nvme_completion) * */
+/*                                       cq_info->head); */
 
-    completion_entry->sqhd = sqhd;
-    completion_entry->sqid = sq_info->qid;
-    completion_entry->cid = cid;
-    completion_entry->status.sct = 0x0;
-    completion_entry->status.sc = 0x00;
-    completion_entry->status.p = !completion_entry->status.p;
+/*     completion_entry->sqhd = sqhd; */
+/*     completion_entry->sqid = sq_info->qid; */
+/*     completion_entry->cid = cid; */
+/*     completion_entry->status.sct = 0x0; */
+/*     completion_entry->status.sc = 0x00; */
+/*     completion_entry->status.p = !completion_entry->status.p; */
 
-    DPRINTF("cid: 0x%x, cqid: 0x%x, cq_info->head 0x%x, cq_info->size 0x%x\n",
-            cid, sq_info->completion_qid, cq_info->head, cq_info->size);
-    cq_info->head++;
-    if (cq_info->head == cq_info->size) {
-        cq_info->head = 0;
-    }
-    pthread_mutex_unlock(&cq_info->mtx);
+/*     DPRINTF("cid: 0x%x, cqid: 0x%x, cq_info->head 0x%x, cq_info->size 0x%x\n", */
+/*             cid, sq_info->completion_qid, cq_info->head, cq_info->size); */
+/*     cq_info->head++; */
+/*     if (cq_info->head == cq_info->size) { */
+/*         cq_info->head = 0; */
+/*     } */
+/*     pthread_mutex_unlock(&cq_info->mtx); */
 
-    pci_generate_msix(sc->pi, sq_info->completion_qid);
-}
+/*     pci_generate_msix(sc->pi, sq_info->completion_qid); */
+/* } */
 
 static void pci_nvme_execute_nvme_command(struct pci_nvme_softc* sc,
                                           uint16_t qid,
