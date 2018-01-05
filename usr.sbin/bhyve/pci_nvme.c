@@ -15,8 +15,6 @@
 #include "block_if.h"
 #include "bhyverun.h"
 
-/* #define NVME_DEBUG */
-
 #ifdef NVME_DEBUG
 static FILE* dbg;
 #define DPRINTF(format, arg...)      \
@@ -813,7 +811,7 @@ static void nvme_nvm_command_read_write(
 
     DPRINTF("slba 0x%lx, nlba 0x%x, lb size 0x%x\n",
             starting_lba, number_of_lb, logic_block_size);
-    DPRINTF("sqhd: 0x%x, destination addr : 0x%lx\n", sqhd, command->prp1);
+    DPRINTF("sqhd: 0x%x, destination addr : 0x%08lx\n", sqhd, command->prp1);
 
     /*     struct nvme_ioreq *nreq = sq_info->ioreq; */
     struct nvme_ioreq* nreq = STAILQ_FIRST(&sq_info->iofhd);
@@ -831,22 +829,18 @@ static void nvme_nvm_command_read_write(
     
     int data_size = number_of_lb * logic_block_size;
     int page_num = data_size / (1 << 12);
+    if(data_size % (1 << 12))
+    {
+        page_num++;
+    }
     //TODO page size is depend on CC.MPS
-    DPRINTF("all size 0x%x, page num 0x%x\n", 
-            number_of_lb * logic_block_size, 
-            page_num);
-    DPRINTF("PRP 0x%lx 0x%lx\n", command->prp1, command->prp2);
+    DPRINTF("all size 0x%x, page num 0x%x\n", data_size, page_num);
+    DPRINTF("mod 0x%x\n", data_size % (1 << 12));
+    DPRINTF("PRP 0x%08lx 0x%08lx\n", command->prp1, command->prp2);
     DPRINTF("CDW0 0x%x\n", command->rsvd1);
-/*     if(page_num != 1) { */
-/*         DPRINTF("%lx \n", *(uintptr_t*)command->prp2); */
-/*     } */
-
-/*     for(int i=0; i < page_num - 1; ++i){ */
-/*         uint64_t *prp_list = (uint64_t*)command->prp2; */
-/*         DPRINTF("0x%lx\n", prp_list[i]); */
-/*     } */
 
     struct blockif_req* breq = &nreq->io_req;
+    breq->br_offset = 0;
 
     if(command->prp2 == 0) {
 
@@ -857,7 +851,6 @@ static void nvme_nvm_command_read_write(
     }
     else {
 
-        breq->br_iovcnt = page_num;
         if(page_num == 2) {
             breq->br_iov[0].iov_base =
                 paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
@@ -870,11 +863,12 @@ static void nvme_nvm_command_read_write(
         }
         else if(page_num > 2) {
 
-            breq->br_iov[0].iov_base =
-                paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
-                        (1 << 12));
+            int prp1_offset = (command->prp1 & 0xfff);
+            int prp1_size = (1 << 12) - prp1_offset;
 
-            breq->br_iov[0].iov_len = 1 << 12;
+            breq->br_iov[0].iov_base =
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp1, prp1_size);
+            breq->br_iov[0].iov_len = prp1_size;
 
             data_size -= 1 << 12;
 
@@ -882,22 +876,27 @@ static void nvme_nvm_command_read_write(
                     sc->pi->pi_vmctx, 
                     command->prp2,
                     sizeof(uint64_t) * (page_num - 1));
-            for(int i=0; i < (page_num - 2); ++i) {
-                DPRINTF("prp_list[%d] 0x%lx\n", i, prp_list[i]);
 
-                breq->br_iov[i + 1].iov_base = 
-                    paddr_guest2host(sc->pi->pi_vmctx, prp_list[i], (1 << 12));
-                breq->br_iov[i + 1].iov_len = 1 << 12;
-                data_size -= 1 << 12;
+            DPRINTF("prp1   : 0x%lx, 0x%x\n", command->prp1, prp1_size);
+                    
+            //TODO be carefull of size. br_iov[BLOCKIF_IOV_MAX].
+            for(int i=1; i< page_num; ++i)
+            {
+                int size = (1<<12);
+                if(data_size < (1 << 12))
+                {
+                    assert(i == (page_num - 1));
+                    size = data_size;
+                }
+                breq->br_iov[i].iov_base = 
+                    paddr_guest2host(sc->pi->pi_vmctx, prp_list[i - 1], size);
+                breq->br_iov[i].iov_len = size;
+
+                data_size -= size;
+                DPRINTF("prp2[%d]   : 0x%lx, 0x%x\n", i, prp_list[i], size);
             }
-
-            DPRINTF("prp_list[%d] 0x%lx\n", 
-                    page_num - 2, prp_list[page_num - 2]);
-            DPRINTF("data size 0x%x\n", data_size);
-            breq->br_iov[page_num - 1].iov_base = 
-                paddr_guest2host(sc->pi->pi_vmctx, 
-                        prp_list[page_num - 2], data_size);
-            breq->br_iov[page_num - 1].iov_len = data_size;
+            DPRINTF("last data size: 0x%x\n", data_size);
+            DPRINTF("page num 0x%x", page_num);
         }
         else {
             breq->br_iov[0].iov_base =
@@ -906,9 +905,9 @@ static void nvme_nvm_command_read_write(
 
             breq->br_iov[0].iov_len = number_of_lb * logic_block_size;
         }
-
     }
-    breq->br_offset = starting_lba * logic_block_size;
+    breq->br_iovcnt = page_num;
+    breq->br_offset += starting_lba * logic_block_size;
     breq->br_resid = number_of_lb * logic_block_size;
     breq->br_callback = pci_nvme_blockif_ioreq_cb;
     breq->br_param = nreq;
