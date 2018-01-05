@@ -852,14 +852,15 @@ static void nvme_nvm_command_read_write(
     else {
 
         if(page_num == 2) {
+            // page size (4k)
+            int size = 1 << 12;
             breq->br_iov[0].iov_base =
-                paddr_guest2host(sc->pi->pi_vmctx, command->prp1,
-                        1 << 12); // page size (4k)
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp1, size); 
+            breq->br_iov[0].iov_len = size;
 
-            breq->br_iov[1].iov_len = number_of_lb * logic_block_size;
             breq->br_iov[1].iov_base = 
-                paddr_guest2host(sc->pi->pi_vmctx, command->prp2,
-                        number_of_lb * logic_block_size - (1 << 12));
+                paddr_guest2host(sc->pi->pi_vmctx, command->prp2, size);
+            breq->br_iov[1].iov_len = size;
         }
         else if(page_num > 2) {
 
