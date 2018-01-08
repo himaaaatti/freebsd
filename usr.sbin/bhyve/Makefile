@@ -5,8 +5,6 @@
 PROG=	bhyve
 PACKAGE=	bhyve
 
-DEBUG_FLAGS= -g -O0 -DNVME_DEBUG
-
 MAN=	bhyve.8
 
 BHYVE_SYSDIR?=${SRCTOP}
