@@ -124,6 +124,7 @@ union cc_register {
 } __packed;
 
 enum shn_value {
+    NVME_SHN_NOEFCT     = 0x0,
 	NVME_SHN_NORMAL		= 0x1,
 	NVME_SHN_ABRUPT		= 0x2,
 };

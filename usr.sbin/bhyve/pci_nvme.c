@@ -44,103 +44,6 @@ enum nvme_controller_register_offsets {
     NVME_CR_IO_QUEUE_BASE = 0x1000,
 };
 
-const char* get_nvme_cr_text(enum nvme_controller_register_offsets offset,
-                             bool is_read)
-{
-    switch (offset) {
-        case NVME_CR_CAP_LOW:
-            return "CAP_LOW";
-        case NVME_CR_CAP_HI:
-            return "CAP_HI";
-        case NVME_CR_VS:
-            return "VS";
-        case NVME_CR_CC:
-            return "CC";
-        case NVME_CR_CSTS:
-            return "CSTS";
-        case NVME_CR_AQA:
-            return "AQA";
-        case NVME_CR_ASQ_LOW:
-            return "ASQ_LOW";
-        case NVME_CR_ASQ_HI:
-            return "ASQ_HI";
-        case NVME_CR_ACQ_LOW:
-            return "ACQ_LOQ";
-        case NVME_CR_ACQ_HI:
-            return "ACQ_HI";
-
-        default:
-            if (is_read) {
-                DPRINTF("read ");
-            }
-            else {
-                DPRINTF("write ");
-            }
-            DPRINTF("0x%x\n", offset);
-            assert(0);
-    }
-}
-
-const char* get_admin_command_text(enum nvme_admin_opcode opc)
-{
-    switch (opc) {
-        case NVME_OPC_DELETE_IO_SQ:
-            return "delete i/o submission queue";
-        case NVME_OPC_CREATE_IO_SQ:
-            return "create i/o submission queue";
-        case NVME_OPC_GET_LOG_PAGE:
-            return "get log page";
-        case NVME_OPC_DELETE_IO_CQ:
-            return "delete i/o completion queue";
-        case NVME_OPC_CREATE_IO_CQ:
-            return "create i/o completion queue";
-        case NVME_OPC_IDENTIFY:
-            return "identify";
-        case NVME_OPC_ABORT:
-            return "abort";
-        case NVME_OPC_SET_FEATURES:
-            return "set feature";
-        case NVME_OPC_GET_FEATURES:
-            return "get feature";
-        case NVME_OPC_ASYNC_EVENT_REQUEST:
-            return "async event request";
-        case NVME_OPC_FIRMWARE_ACTIVATE:
-            return "firmware activate";
-        case NVME_OPC_FIRMWARE_IMAGE_DOWNLOAD:
-            return "firmware image download";
-        case NVME_OPC_FORMAT_NVM:
-            return "format nvm";
-        case NVME_OPC_SECURITY_SEND:
-            return "security send";
-        case NVME_OPC_SECURITY_RECEIVE:
-            return "security receive";
-
-        default:
-            assert(0 && "unknown opc\n");
-    }
-}
-
-const char* get_nvm_command_text(enum nvme_nvm_opcode opc)
-{
-    switch (opc) {
-        case NVME_OPC_FLUSH:
-            return "flush";
-        case NVME_OPC_WRITE:
-            return "write";
-        case NVME_OPC_READ:
-            return "read";
-        case NVME_OPC_WRITE_UNCORRECTABLE:
-            return "write uncorrectable";
-        case NVME_OPC_COMPARE:
-            return "compare";
-        case NVME_OPC_DATASET_MANAGEMENT:
-            return "dataset management";
-
-        default:
-            assert(0 && "unknown opc");
-    }
-}
-
 enum nvme_cmd_identify_cdw10 {
     NVME_CMD_IDENTIFY_CDW10_CNTID = 0xffff0000,
     NVME_CMD_IDENTIFY_CDW10_RSV = 0x0000ff00,
@@ -151,18 +54,6 @@ enum nvme_cmd_identify_data {
     NVME_CMD_IDENTIFY_CNS_NAMESPACE = 0x0,
     NVME_CMD_IDENTIFY_CNS_CONTROLLER = 0x1,
 };
-
-const char* get_identify_command_type(enum nvme_cmd_identify_data cns)
-{
-    switch (cns) {
-        case NVME_CMD_IDENTIFY_CNS_NAMESPACE:
-            return "namespace";
-        case NVME_CMD_IDENTIFY_CNS_CONTROLLER:
-            return "controller";
-        default:
-            assert(0 && "unknown cns values");
-    }
-}
 
 enum nvme_cc_bits {
     NVME_CC_EN = 0x00000001,
@@ -300,7 +191,7 @@ static void pci_nvme_reset(struct pci_nvme_softc* sc)
     sc->acq_base = 0;
 }
 
-static void initialize_feature(struct pci_nvme_softc* sc)
+static void nvme_initialize_feature(struct pci_nvme_softc* sc)
 {
     sc->features.temparture_threshold.bits.over = 0xffff;
     sc->features.temparture_threshold.bits.under = 0x0000;
@@ -309,9 +200,10 @@ static void initialize_feature(struct pci_nvme_softc* sc)
     // TODO initialize other values
 }
 
-static void initialize_identify(struct pci_nvme_softc* sc)
+static void nvme_initialize_identify(struct pci_nvme_softc* sc)
 {
-    sc->controller_data.nn = 0x1;  // TODO consider this value
+    // TODO consider this value
+    sc->controller_data.nn = 0x1;  
 
     // LBA format
     sc->namespace_data.lbaf[0].ms = 0x00;
@@ -431,8 +323,8 @@ static int pci_nvme_init(struct vmctx* ctx, struct pci_devinst* pi, char* opts)
         pci_nvme_submission_queue_init(&sc->sqs_info[i], sc->bctx);
     }
 
-    initialize_identify(sc);
-    initialize_feature(sc);
+    nvme_initialize_identify(sc);
+    nvme_initialize_feature(sc);
 
     return 0;
 
@@ -551,9 +443,8 @@ static void nvme_execute_identify_command(struct pci_nvme_softc* sc,
                                           struct nvme_command* command,
                                           struct nvme_completion* cmp_entry)
 {
-    DPRINTF("Identify command (%s)\n",
-            get_identify_command_type(command->cdw10 &
-                                      NVME_CMD_IDENTIFY_CDW10_CNS));
+    DPRINTF("Identify command (0x%x)\n", 
+            command->cdw10 & NVME_CMD_IDENTIFY_CDW10_CNS);
     DPRINTF("cdw10 0x%x, dptr 0x%lx, 0x%lx", command->cdw10, command->prp1,
             command->prp2);
     uintptr_t dest_addr = (uintptr_t)vm_map_gpa(
@@ -714,7 +605,7 @@ static void pci_nvme_execute_admin_command(struct pci_nvme_softc* sc,
     cmp_entry->cid = command->cid;
     cmp_entry->status.p = !cmp_entry->status.p;
 
-    DPRINTF("[admin command] %s\n", get_admin_command_text(command->opc));
+    DPRINTF("[admin command] 0x%x\n", command->opc);
     switch (command->opc) {
         case NVME_OPC_DELETE_IO_SQ:
             nvme_execute_delete_io_sq_command(sc, command, cmp_entry);
@@ -923,7 +814,8 @@ static void nvme_nvm_command_read_write(
             err = blockif_write(sc->bctx, breq);
             break;
         default:
-            assert("??");
+            //TODO
+            assert(0 && "??");
     }
 
     assert(err == 0 && "blockif_read or blockif_write failed");
@@ -983,7 +875,7 @@ static void pci_nvme_execute_nvme_command(struct pci_nvme_softc* sc,
     /*     struct nvme_completion_queue_info *cq_info =
      * &sc->cqs_info[completion_qid]; */
 
-    DPRINTF("***** nvm command %s *****\n", get_nvm_command_text(command->opc));
+    DPRINTF("***** nvm command 0x%x *****\n", command->opc);
     DPRINTF("opc: 0x%x, cid: 0x%x, nsid: 0x%x, qid: 0x%x, sq_tail 0x%lx\n",
             command->opc, command->cid, command->nsid, qid, sq_tail);
 
@@ -1059,7 +951,7 @@ static void pci_nvme_write_bar_0(struct vmctx* ctx,
         assert(0);
     }
 
-    DPRINTF("write %s, value %lx \n", get_nvme_cr_text(regoff, false), value);
+    DPRINTF("write 0x%lx, value %lx \n", regoff, value);
     assert(size == 4 && "word size should be 4(byte)");
     switch (regoff) {
         case NVME_CR_CC:
@@ -1171,7 +1063,7 @@ static uint64_t pci_nvme_read_bar_0(
     enum nvme_controller_register_offsets offset,
     int size)
 {
-    DPRINTF("read %s\n", get_nvme_cr_text(offset, true));
+    DPRINTF("read 0x%x\n", offset);
     assert(size == 4 && "word size should be 4.");
     switch (offset) {
         case NVME_CR_CAP_LOW:
