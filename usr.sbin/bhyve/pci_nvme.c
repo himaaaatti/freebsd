@@ -164,7 +164,14 @@ static void pci_nvme_reset(struct pci_nvme_softc* sc)
     /*
      * Controller Register values are according to NVMe specification 1.0e.
      */
+
+    /*
+     * Controller Capabilites
+     */
+    // Maximum queue (I/O submission and completion queue) entries supported by nvme controller
     sc->regs.cap_lo.bits.mqes = 0x10;
+
+    // Contiguous Queues Required
     sc->regs.cap_lo.bits.cqr = 1;
     sc->regs.cap_lo.bits.ams = 0;
     sc->regs.cap_lo.bits.reserved1 = 0;
@@ -175,12 +182,27 @@ static void pci_nvme_reset(struct pci_nvme_softc* sc)
     sc->regs.cap_hi.bits.css_nvm = 0;
     sc->regs.cap_hi.bits.css_reserved = 0;
     sc->regs.cap_hi.bits.reserved2 = 0;
+    /*
+     * MPSMIN and MPSMAX 
+     *  indicate the minimum and maximum host memory page size
+     *  (2 ^ (12 + MPSMAX or MPSMIN))
+     */
     sc->regs.cap_hi.bits.mpsmin = 0;
     sc->regs.cap_hi.bits.mpsmax = 0;
     sc->regs.cap_hi.bits.reserved1 = 0;
 
+    /*
+     * Version of NVM express specification.
+     */ 
+    // in this case, the version is 1.0
     uint32_t version = (0x0001 << 16) | 0x0000;
     sc->regs.vs = version;
+
+    // Interrupt Mask Set
+    sc->regs.intms = 0;
+    
+    // Interrupt Mask clear
+    sc->regs.intmc = 0;
 
     sc->regs.cc.raw = 0;
 
